@@ -5378,6 +5378,9 @@ struct Save {
     int complaints = 0, totalChecks = 0, totalFines = 0, totalDetain = 0, totalChases = 0, totalCorrect = 0, totalWrong = 0;
     int dateDays = 0; bool sound = true; int camView = 0; int lastDistrict = 0;
     bool tutorialShown = false;
+    // настройки управления
+    float steerMul = 1.0f, gripMul = 1.0f, steerSpd = 1.0f;
+    bool laneAssist = false, tilt = false, tiltInv = false; float tiltSens = 1.0f;
 };
 static Save SV;
 
@@ -5389,6 +5392,7 @@ struct PlayerCar {
     float pitch = 0, roll = 0, pv = 0, rv = 0, spin = 0;
     bool siren = false, flash = false, brakeLight = false, reverse = false, offroad = false, sliding = false;
     float lastSpeed = 0, rpm = 0, load = 0, exhaustT = 0, hitCooldown = 0, limitKmh = 60;
+    float velYaw = 0; bool velInit = false;   // направление скорости (для заноса)
     float halfW = 0.85f, halfL = 2.1f;
 };
 static PlayerCar PL;
@@ -5451,31 +5455,50 @@ static void updatePlayer(float dt, const Input& in) {
     if (PL.offroad) PL.speed = approach(PL.speed, 0, fabsf(PL.speed) * 0.18f * dt);
     if (PL.speed > vmax) PL.speed = approach(PL.speed, vmax, 3 * dt);
     float av = fabsf(PL.speed);
-    // руль: почти мгновенный отклик, мало теряет угол на скорости
-    float maxSteer = 0.66f / (1 + av * 0.016f);
+    // руль (настраивается игроком): резкость, скорость поворота руля, сцепление
+    float maxSteer = 0.66f * SV.steerMul / (1 + av * 0.016f);
     float tgt = in.steer * maxSteer;
-    float rate = (fabsf(tgt) < fabsf(PL.steer) || tgt * PL.steer < 0) ? 9.0f : 6.5f;
+    float rate = ((fabsf(tgt) < fabsf(PL.steer) || tgt * PL.steer < 0) ? 9.0f : 6.5f) * SV.steerSpd;
     PL.steer = approach(PL.steer, tgt, rate * dt);
     float yr = PL.speed * tanf(PL.steer) / M.wheelbase;
-    // аркадное сцепление: ~2–2.7 g, крутые повороты без заноса
-    float maxLat = 9.81f * grip * 2.6f;
-    PL.sliding = false;
+    float maxLat = 9.81f * grip * 2.6f * SV.gripMul;
     if (fabsf(yr * PL.speed) > maxLat && av > 1) {
         float lim2 = maxLat / av;
-        PL.sliding = fabsf(yr) > lim2 * 1.3f && av > 15;
         yr = (yr > 0 ? 1 : -1) * lim2;
     }
     // на очень малой скорости машина всё равно разворачивается
     if (av > 0.3f && av < 4 && fabsf(in.steer) > 0.01f) {
-        float minYr = 0.55f * in.steer * (PL.speed > 0 ? 1.f : -1.f) * clampf(av / 2, 0, 1);
+        float minYr = 0.55f * in.steer * (PL.speed > 0 ? 1.f : -1.f) * clampf(av / 2, 0, 1) * SV.steerMul;
         if (fabsf(yr) < fabsf(minYr)) yr = minYr;
     }
-    PL.yawRate = approach(PL.yawRate, yr, 14.0f * dt * std::max(1.0f, fabsf(yr - PL.yawRate)));
+    // при низком сцеплении поворот «срывается» сильнее — машину заносит
+    float yrGain = SV.gripMul < 0.9f ? 1.0f + (0.9f - SV.gripMul) * 1.6f : 1.0f;
+    PL.yawRate = approach(PL.yawRate, yr * yrGain, 14.0f * SV.steerSpd * dt * std::max(1.0f, fabsf(yr - PL.yawRate)));
     yr = PL.yawRate;
     PL.yaw = wrapAngle(PL.yaw + yr * dt);
-    // в повороте немного сбрасываем скорость (как настоящая машина), чтобы не вылетать
+    // помощь удержания полосы (по желанию)
+    if (SV.laneAssist && fabsf(in.steer) < 0.01f && av > 6 && !PL.offroad) {
+        RoadHit h = nearestRoad(PL.pos);
+        if (h.edge >= 0 && !h.onNode) {
+            float ry = EDGES[h.edge].yaw;
+            float e1 = wrapAngle(ry - PL.yaw), e2 = wrapAngle(ry + PI - PL.yaw);
+            float err = fabsf(e1) < fabsf(e2) ? e1 : e2;
+            if (fabsf(err) < 0.3f) PL.yaw = wrapAngle(PL.yaw + clampf(err, -1, 1) * 1.6f * dt);
+        }
+    }
+    // направление движения догоняет направление кузова; при низком сцеплении — с запаздыванием (занос)
+    if (!PL.velInit) { PL.velYaw = PL.yaw; PL.velInit = true; }
+    float follow = 1.2f + 32.0f * clampf((SV.gripMul - 0.7f) / 0.5f, 0, 1);
+    if (av < 3) follow = 40;
+    float slip = wrapAngle(PL.yaw - PL.velYaw);
+    PL.velYaw = wrapAngle(PL.velYaw + slip * std::min(1.0f, follow * dt));
+    slip = wrapAngle(PL.yaw - PL.velYaw);
+    if (fabsf(slip) > 1.2f) PL.velYaw = wrapAngle(PL.yaw - (slip > 0 ? 1.2f : -1.2f));
+    PL.sliding = fabsf(slip) > 0.12f && av > 8;
+    if (PL.sliding) PL.speed = approach(PL.speed, 0, fabsf(slip) * 3.0f * dt);
+    // в повороте немного сбрасываем скорость, чтобы не вылетать
     if (fabsf(yr) * av > maxLat * 0.6f && thr < 0.5f) PL.speed = approach(PL.speed, 0, fabsf(yr) * 1.2f * dt);
-    PL.pos += fwdOf(PL.yaw) * (PL.speed * dt);
+    PL.pos += fwdOf(PL.velYaw) * (PL.speed * dt);
     // столкновения со статикой
     V3 cs[5]; int n = carCircles(PL.pos, PL.yaw, PL.halfW, PL.halfL, cs);
     PL.hitCooldown -= dt;
@@ -6101,7 +6124,10 @@ static void drawSpeedCams(float time) {
 // =====================================================================
 //  Игровая логика и интерфейс
 // =====================================================================
-enum Screen { SC_MENU, SC_SHIFTSTART, SC_DRIVE, SC_DOCS, SC_TRUNK, SC_DECIDE, SC_RESULT, SC_PAUSE, SC_MAP, SC_GARAGE, SC_SUMMARY, SC_HELP, SC_EXITCONFIRM };
+enum Screen { SC_MENU, SC_SHIFTSTART, SC_DRIVE, SC_DOCS, SC_TRUNK, SC_DECIDE, SC_RESULT, SC_PAUSE, SC_MAP, SC_GARAGE, SC_SUMMARY, SC_HELP, SC_EXITCONFIRM, SC_SETTINGS };
+static int gSettingsReturn = 0;
+static SDL_Joystick* gAccel = nullptr;
+static float accelSteer();
 static int gScreen = SC_MENU, gMapReturn = SC_MENU, gHelpReturn = SC_MENU;
 static float gTime = 0;          // реальное время (анимации)
 static bool gQuit = false;
@@ -6637,6 +6663,7 @@ static void saveGame() {
     for (int i = 0; i < U_COUNT; i++) fprintf(f, "upg%d %d\n", i, SV.upg[i]);
     fprintf(f, "complaints %d\nchecks %d\nfines %d\ndetain %d\nchases %d\ncorrect %d\nwrong %d\n", SV.complaints, SV.totalChecks, SV.totalFines, SV.totalDetain, SV.totalChases, SV.totalCorrect, SV.totalWrong);
     fprintf(f, "sound %d\ncamview %d\ndistrict %d\ntutorial %d\n", SV.sound ? 1 : 0, SV.camView, SV.lastDistrict, SV.tutorialShown ? 1 : 0);
+    fprintf(f, "steermul %d\ngripmul %d\nsteerspd %d\nassist %d\ntilt %d\ntiltinv %d\ntiltsens %d\n", (int)(SV.steerMul * 100), (int)(SV.gripMul * 100), (int)(SV.steerSpd * 100), SV.laneAssist ? 1 : 0, SV.tilt ? 1 : 0, SV.tiltInv ? 1 : 0, (int)(SV.tiltSens * 100));
     for (const Camera_& c : SPEEDCAMS) fprintf(f, "cam %d %d %.1f\n", c.edge, c.dir, c.s);
     fclose(f);
 }
@@ -6654,6 +6681,13 @@ static void loadGame() {
         else if (!strcmp(key, "complaints")) SV.complaints = v; else if (!strcmp(key, "checks")) SV.totalChecks = v; else if (!strcmp(key, "fines")) SV.totalFines = v;
         else if (!strcmp(key, "detain")) SV.totalDetain = v; else if (!strcmp(key, "chases")) SV.totalChases = v; else if (!strcmp(key, "correct")) SV.totalCorrect = v;
         else if (!strcmp(key, "wrong")) SV.totalWrong = v; else if (!strcmp(key, "sound")) SV.sound = v != 0; else if (!strcmp(key, "camview")) SV.camView = v;
+        else if (!strcmp(key, "steermul")) SV.steerMul = clampf(v / 100.f, 0.4f, 2.0f);
+        else if (!strcmp(key, "gripmul")) SV.gripMul = clampf(v / 100.f, 0.5f, 2.0f);
+        else if (!strcmp(key, "steerspd")) SV.steerSpd = clampf(v / 100.f, 0.3f, 2.5f);
+        else if (!strcmp(key, "tiltsens")) SV.tiltSens = clampf(v / 100.f, 0.3f, 2.5f);
+        else if (!strcmp(key, "assist")) SV.laneAssist = v != 0;
+        else if (!strcmp(key, "tilt")) SV.tilt = v != 0;
+        else if (!strcmp(key, "tiltinv")) SV.tiltInv = v != 0;
         else if (!strcmp(key, "district")) SV.lastDistrict = std::max(0, std::min(3, v)); else if (!strcmp(key, "tutorial")) SV.tutorialShown = v != 0;
     }
     fclose(f);
@@ -7284,6 +7318,7 @@ static void drawDriveHUD() {
     if (gTarget < 0 && gInspect < 0 && gChaseCar < 0) UI.text(ax + ab * 0.5f - ab * 0.56f, ay - u * 12, "НАЖМИ НА МАШИНУ", u * 0.8f, RGBA(255, 255, 255, 200), 1, true);
     // ввод
     gIn.steer = (rh ? 1.f : 0.f) - (lh ? 1.f : 0.f);
+    if (SV.tilt && gAccel && !lh && !rh) gIn.steer = accelSteer();
     gIn.throttle = gas ? 1.f : 0.f; gIn.brake = brk ? 1.f : 0.f;
 }
 
@@ -7800,7 +7835,7 @@ static void drawMenu(float dt) {
     if (button(bx, by, bw, bh, "КАМЕРЫ НА КАРТЕ", C_GRAY, u * 1.2f)) { gMapReturn = SC_MENU; gScreen = SC_MAP; }
     by += bh + u * 6;
     if (button(bx, by, bw * 0.48f, bh, "ПАМЯТКА", C_GRAY, u * 1.0f)) { gHelpReturn = SC_MENU; gScreen = SC_HELP; }
-    if (button(bx + bw * 0.52f, by, bw * 0.48f, bh, SV.sound ? "ЗВУК: ВКЛ" : "ЗВУК: ВЫКЛ", C_GRAY, u * 1.0f)) { SV.sound = !SV.sound; SY.muted = !SV.sound; saveGame(); }
+    if (button(bx + bw * 0.52f, by, bw * 0.48f, bh, "НАСТРОЙКИ", C_GRAY, u * 1.0f)) { gSettingsReturn = SC_MENU; gScreen = SC_SETTINGS; }
     by += bh + u * 6;
     if (button(bx, by, bw, bh * 0.85f, "ВЫХОД", RGBA(110, 40, 40), u * 1.1f) || gBackPressed) { gBackPressed = false; gScreen = SC_EXITCONFIRM; }
     SY.engVol = 0.3f; SY.engRpm = 0.12f; SY.engLoad = 0; SY.siren = 0; SY.rain = 0; SY.ambient = 0.15f; SY.screech = 0;
@@ -7859,9 +7894,94 @@ static void drawPause() {
     by += bh + u * 6;
     if (button(x + u * 10, by, w - u * 20, bh, "ПАМЯТКА", C_GRAY, u * 1.1f)) { gHelpReturn = SC_PAUSE; gScreen = SC_HELP; }
     by += bh + u * 6;
-    if (button(x + u * 10, by, (w - u * 24) / 2, bh, SV.sound ? "ЗВУК ВКЛ" : "ЗВУК ВЫКЛ", C_GRAY, u * 1.0f)) { SV.sound = !SV.sound; SY.muted = !SV.sound; }
+    if (button(x + u * 10, by, (w - u * 24) / 2, bh, "НАСТРОЙКИ", C_GRAY, u * 1.0f)) { gSettingsReturn = SC_PAUSE; gScreen = SC_SETTINGS; }
     if (button(x + u * 14 + (w - u * 24) / 2, by, (w - u * 24) / 2, bh, "ЗАКОНЧИТЬ", RGBA(150, 50, 40), u * 1.0f)) { endShift(); }
     SY.engVol = 0; SY.siren = 0; SY.screech = 0;
+}
+
+// ---------------------------------------------------------------------
+//  Настройки управления
+// ---------------------------------------------------------------------
+static float slider(float x, float y, float w, float h, const char* label, const std::string& valText, float v, float lo, float hi) {
+    float u = U();
+    UI.text(x, y - u * 11, label, u * 1.0f, C_WHITE);
+    UI.text(x + w, y - u * 11, valText.c_str(), u * 1.0f, C_YELLOW, 2);
+    for (const Finger& f : FINGERS) if (f.x >= x - u * 10 && f.x <= x + w + u * 10 && f.y >= y - h && f.y <= y + h * 2) v = lo + clampf((f.x - x) / w, 0, 1) * (hi - lo);
+    for (Tap& t : TAPS) if (!t.used && t.x >= x - u * 10 && t.x <= x + w + u * 10 && t.y >= y - h && t.y <= y + h * 2) { t.used = true; v = lo + clampf((t.x - x) / w, 0, 1) * (hi - lo); }
+    float k = clampf((v - lo) / (hi - lo), 0, 1);
+    UI.roundRect(x, y + h * 0.3f, w, h * 0.4f, h * 0.2f, RGBA(60, 66, 78));
+    UI.roundRect(x, y + h * 0.3f, std::max(h * 0.4f, w * k), h * 0.4f, h * 0.2f, C_BLUE);
+    UI.circle(x + w * k, y + h * 0.5f, h * 0.55f, C_WHITE, 20);
+    return v;
+}
+static float radiusAt(float kmh) {
+    const CarModel& M = CM[PATROL[SV.car].model];
+    float v = kmh / 3.6f;
+    float ms = 0.66f * SV.steerMul / (1 + v * 0.016f);
+    float yr = v * tanf(ms) / M.wheelbase;
+    float maxLat = 9.81f * specGrip() * 2.6f * SV.gripMul;
+    if (yr * v > maxLat) yr = maxLat / v;
+    if (SV.gripMul < 0.9f) yr *= 1.0f + (0.9f - SV.gripMul) * 1.6f;
+    return v / std::max(yr, 1e-3f);
+}
+static float accelSteer() {
+    if (!gAccel) return 0;
+    float a = SDL_JoystickGetAxis(gAccel, 0) / 32767.0f;
+    float s = -a * 2.6f * SV.tiltSens;
+    if (SV.tiltInv) s = -s;
+    if (fabsf(s) < 0.06f) s = 0;
+    return clampf(s, -1, 1);
+}
+static void drawSettings(float dt) {
+    float u = U();
+    if (gSettingsReturn == SC_MENU) drawMenuScene(dt);
+    else { updateCamera(0, false); drawWorldScene(dt, true, gCamMode == 1); }
+    UI.rect(0, 0, SW, SH, RGBA(0, 0, 0, 170));
+    float mx = std::max(SW * 0.05f, 16.0f), mt = SH * 0.04f;
+    float W = SW - 2 * mx, H = SH - 2 * mt;
+    panel(mx, mt, W, H, C_DARK);
+    UI.text(mx + u * 10, mt + u * 7, "НАСТРОЙКИ УПРАВЛЕНИЯ", u * 1.6f, C_WHITE);
+    // готовые режимы
+    float px = mx + u * 10, py = mt + u * 26, pw = (W * 0.55f - u * 26) / 4, ph = u * 20;
+    struct Pre { const char* n; float s, g, sp; };
+    static const Pre pres[4] = {{"МЯГКО", 0.8f, 0.9f, 0.75f}, {"ОБЫЧНО", 1.0f, 1.0f, 1.0f}, {"РЕЗКО", 1.35f, 1.35f, 1.5f}, {"ДРИФТ", 1.4f, 0.62f, 1.4f}};
+    for (int i = 0; i < 4; i++) {
+        bool cur = fabsf(SV.steerMul - pres[i].s) < 0.02f && fabsf(SV.gripMul - pres[i].g) < 0.02f && fabsf(SV.steerSpd - pres[i].sp) < 0.02f;
+        if (button(px + i * (pw + u * 2), py, pw, ph, pres[i].n, cur ? C_BLUE : C_GRAY, u * 0.95f)) { SV.steerMul = pres[i].s; SV.gripMul = pres[i].g; SV.steerSpd = pres[i].sp; }
+    }
+    // ползунки
+    float sx = px, sw = W * 0.55f - u * 20, sh = u * 10, sy = py + ph + u * 26;
+    SV.steerMul = slider(sx, sy, sw, sh, "РЕЗКОСТЬ РУЛЯ (УГОЛ ПОВОРОТА КОЛЁС)", fmt("%d%%", (int)(SV.steerMul * 100 + 0.5f)), SV.steerMul, 0.5f, 1.8f); sy += u * 30;
+    SV.gripMul = slider(sx, sy, sw, sh, "СЦЕПЛЕНИЕ (МЕНЬШЕ — БОЛЬШЕ ЗАНОСА)", fmt("%d%%", (int)(SV.gripMul * 100 + 0.5f)), SV.gripMul, 0.55f, 1.8f); sy += u * 30;
+    SV.steerSpd = slider(sx, sy, sw, sh, "СКОРОСТЬ РУЛЯ (ОТКЛИК КНОПОК)", fmt("%d%%", (int)(SV.steerSpd * 100 + 0.5f)), SV.steerSpd, 0.4f, 2.0f); sy += u * 30;
+    if (SV.tilt) { SV.tiltSens = slider(sx, sy, sw, sh, "ЧУВСТВИТЕЛЬНОСТЬ НАКЛОНА", fmt("%d%%", (int)(SV.tiltSens * 100 + 0.5f)), SV.tiltSens, 0.4f, 2.0f); sy += u * 30; }
+    // переключатели
+    float tx = mx + W * 0.58f, tw = W * 0.42f - u * 10, ty = py, th = u * 22;
+    if (button(tx, ty, tw, th, SV.laneAssist ? "ПОМОЩЬ ПОЛОСЫ: ВКЛ" : "ПОМОЩЬ ПОЛОСЫ: ВЫКЛ", SV.laneAssist ? C_GREEN : C_GRAY, u * 0.95f)) SV.laneAssist = !SV.laneAssist;
+    ty += th + u * 5;
+    if (gAccel) { if (button(tx, ty, tw, th, SV.tilt ? "РУЛЬ НАКЛОНОМ: ВКЛ" : "РУЛЬ НАКЛОНОМ: ВЫКЛ", SV.tilt ? C_GREEN : C_GRAY, u * 0.95f)) SV.tilt = !SV.tilt; }
+    else button(tx, ty, tw, th, "РУЛЬ НАКЛОНОМ: НЕТ ДАТЧИКА", C_GRAY, u * 0.95f, false);
+    ty += th + u * 5;
+    if (SV.tilt && gAccel) {
+        if (button(tx, ty, tw, th, SV.tiltInv ? "ИНВЕРСИЯ НАКЛОНА: ВКЛ" : "ИНВЕРСИЯ НАКЛОНА: ВЫКЛ", C_GRAY, u * 0.95f)) SV.tiltInv = !SV.tiltInv;
+        ty += th + u * 5;
+        // индикатор наклона
+        float s = accelSteer();
+        UI.roundRect(tx, ty, tw, u * 10, u * 3, RGBA(40, 46, 56));
+        UI.rect(tx + tw / 2 - 1, ty, 2, u * 10, C_LIGHT);
+        UI.circle(tx + tw / 2 + s * tw / 2 * 0.95f, ty + u * 5, u * 5, C_YELLOW, 16);
+        ty += u * 15;
+    }
+    if (button(tx, ty, tw, th, SV.sound ? "ЗВУК: ВКЛ" : "ЗВУК: ВЫКЛ", C_GRAY, u * 0.95f)) { SV.sound = !SV.sound; SY.muted = !SV.sound; }
+    ty += th + u * 10;
+    // подсказка с цифрами
+    UI.text(tx, ty, (std::string("МАШИНА: ") + PATROL[SV.car].name).c_str(), u * 0.9f, RGBA(150, 200, 255)); ty += u * 11;
+    UI.text(tx, ty, fmt("РАДИУС ПОВОРОТА НА 60 КМ/Ч: %d М", (int)(radiusAt(60) + 0.5f)).c_str(), u * 0.9f, C_LIGHT); ty += u * 10;
+    UI.text(tx, ty, fmt("РАДИУС ПОВОРОТА НА 100 КМ/Ч: %d М", (int)(radiusAt(100) + 0.5f)).c_str(), u * 0.9f, C_LIGHT); ty += u * 10;
+    if (SV.gripMul < 0.85f) UI.text(tx, ty, "ВНИМАНИЕ: МАШИНУ БУДЕТ ЗАНОСИТЬ", u * 0.9f, C_YELLOW);
+    if (button(mx + u * 10, mt + H - u * 32, u * 110, u * 24, "СБРОС", RGBA(110, 40, 40), u * 1.1f)) { SV.steerMul = 1; SV.gripMul = 1; SV.steerSpd = 1; SV.laneAssist = false; SV.tiltSens = 1; }
+    if (button(mx + W - u * 130, mt + H - u * 32, u * 120, u * 24, "ГОТОВО", C_BLUE, u * 1.2f) || gBackPressed) { gBackPressed = false; saveGame(); gScreen = gSettingsReturn; }
+    SY.engVol = gSettingsReturn == SC_MENU ? 0.3f : 0; SY.siren = 0; SY.screech = 0;
 }
 static void drawSummary(float dt) {
     float u = U();
@@ -7983,6 +8103,7 @@ static void frame(float dt) {
     switch (gScreen) {
         case SC_MENU: drawMenu(dt); break;
         case SC_EXITCONFIRM: drawExitConfirm(dt); break;
+        case SC_SETTINGS: drawSettings(dt); break;
         case SC_SHIFTSTART: drawShiftStart(dt); break;
         case SC_GARAGE: drawGarage(dt); break;
         case SC_HELP: drawHelp(); break;
@@ -8036,6 +8157,7 @@ int main(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
     SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+    SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS) != 0) { SDL_Log("SDL_Init: %s", SDL_GetError()); return 1; }
 #ifdef __ANDROID__
     gWin = SDL_CreateWindow("Инспектор ДПС", 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_ALLOW_HIGHDPI);
@@ -8064,6 +8186,13 @@ int main(int argc, char** argv) {
     if (bp) SDL_free(bp);
 #endif
     loadGame();
+    // акселерометр (на Android доступен как джойстик) — для руления наклоном
+    if (SDL_InitSubSystem(SDL_INIT_JOYSTICK) == 0) {
+        for (int i = 0; i < SDL_NumJoysticks(); i++) {
+            const char* nm = SDL_JoystickNameForIndex(i);
+            if (nm && strstr(nm, "ccelerometer")) { gAccel = SDL_JoystickOpen(i); break; }
+        }
+    }
     initAudio();
     SY.muted = !SV.sound;
     gCamMode = SV.camView;
