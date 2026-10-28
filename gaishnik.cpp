@@ -5451,34 +5451,30 @@ static void updatePlayer(float dt, const Input& in) {
     if (PL.offroad) PL.speed = approach(PL.speed, 0, fabsf(PL.speed) * 0.18f * dt);
     if (PL.speed > vmax) PL.speed = approach(PL.speed, vmax, 3 * dt);
     float av = fabsf(PL.speed);
-    // руль: быстрый отклик на малой скорости, мягче на большой, быстрый возврат в ноль
-    float maxSteer = 0.62f / (1 + av * 0.028f);
+    // руль: почти мгновенный отклик, мало теряет угол на скорости
+    float maxSteer = 0.66f / (1 + av * 0.016f);
     float tgt = in.steer * maxSteer;
-    float rate = fabsf(tgt) < fabsf(PL.steer) || tgt * PL.steer < 0 ? 6.0f : (3.6f - std::min(av, 35.f) * 0.045f);
+    float rate = (fabsf(tgt) < fabsf(PL.steer) || tgt * PL.steer < 0) ? 9.0f : 6.5f;
     PL.steer = approach(PL.steer, tgt, rate * dt);
     float yr = PL.speed * tanf(PL.steer) / M.wheelbase;
-    // аркадное сцепление: держит ~1.3–1.7 g
-    float maxLat = 9.81f * grip * 1.45f;
+    // аркадное сцепление: ~2–2.7 g, крутые повороты без заноса
+    float maxLat = 9.81f * grip * 2.6f;
     PL.sliding = false;
     if (fabsf(yr * PL.speed) > maxLat && av > 1) {
         float lim2 = maxLat / av;
-        PL.sliding = fabsf(yr) > lim2 * 1.15f && av > 12;
+        PL.sliding = fabsf(yr) > lim2 * 1.3f && av > 15;
         yr = (yr > 0 ? 1 : -1) * lim2;
     }
-    // сглаживание скорости поворота — без рывков от цифровых кнопок
-    PL.yawRate = approach(PL.yawRate, yr, 9.0f * dt * std::max(1.0f, fabsf(yr - PL.yawRate)));
+    // на очень малой скорости машина всё равно разворачивается
+    if (av > 0.3f && av < 4 && fabsf(in.steer) > 0.01f) {
+        float minYr = 0.55f * in.steer * (PL.speed > 0 ? 1.f : -1.f) * clampf(av / 2, 0, 1);
+        if (fabsf(yr) < fabsf(minYr)) yr = minYr;
+    }
+    PL.yawRate = approach(PL.yawRate, yr, 14.0f * dt * std::max(1.0f, fabsf(yr - PL.yawRate)));
     yr = PL.yawRate;
     PL.yaw = wrapAngle(PL.yaw + yr * dt);
-    // помощь удержания полосы: без руля машина мягко выравнивается вдоль дороги
-    if (fabsf(in.steer) < 0.01f && av > 6 && !PL.offroad) {
-        RoadHit h = nearestRoad(PL.pos);
-        if (h.edge >= 0 && !h.onNode) {
-            float ry = EDGES[h.edge].yaw;
-            float e1 = wrapAngle(ry - PL.yaw), e2 = wrapAngle(ry + PI - PL.yaw);
-            float err = fabsf(e1) < fabsf(e2) ? e1 : e2;
-            if (fabsf(err) < 0.3f) PL.yaw = wrapAngle(PL.yaw + clampf(err, -1, 1) * 1.6f * dt);
-        }
-    }
+    // в повороте немного сбрасываем скорость (как настоящая машина), чтобы не вылетать
+    if (fabsf(yr) * av > maxLat * 0.6f && thr < 0.5f) PL.speed = approach(PL.speed, 0, fabsf(yr) * 1.2f * dt);
     PL.pos += fwdOf(PL.yaw) * (PL.speed * dt);
     // столкновения со статикой
     V3 cs[5]; int n = carCircles(PL.pos, PL.yaw, PL.halfW, PL.halfL, cs);
@@ -6729,21 +6725,31 @@ static std::string gSubtitle; static float gSubtitleT = 0;
 
 static void subtitle(const std::string& s, float t = 2.5f) { gSubtitle = s; gSubtitleT = t; }
 
+static int gManualTarget = -1; static uint32_t gManualId = 0;
+static bool targetable(const AICar& c, int i) {
+    if (!c.alive || c.mode == CMODE_HELPER || c.mode == CMODE_BLOCK || c.mode == CMODE_GONE || c.mode == CMODE_STOPPED || c.mode == CMODE_PULLOVER || c.mode == CMODE_LEAVE) return false;
+    if (i == gChaseCar || c.checked || c.vanish) return false;
+    return true;
+}
 static void pickTarget() {
-    gTarget = -1; float best = 1e9f;
+    gTarget = -1;
+    // цель, выбранная касанием, — в приоритете
+    if (gManualTarget >= 0) {
+        if (gManualTarget < (int)CARS.size() && CARS[gManualTarget].id == gManualId && targetable(CARS[gManualTarget], gManualTarget) && dist2d(CARS[gManualTarget].pos, PL.pos) < 100) { gTarget = gManualTarget; return; }
+        gManualTarget = -1;
+    }
+    float best = 1e9f;
     V3 f = fwdOf(PL.yaw);
     bool parked = fabsf(PL.speed) < 1.5f;
     for (size_t i = 0; i < CARS.size(); i++) {
         const AICar& c = CARS[i];
-        if (!c.alive || c.mode == CMODE_HELPER || c.mode == CMODE_BLOCK || c.mode == CMODE_GONE || c.mode == CMODE_STOPPED || c.mode == CMODE_PULLOVER || c.mode == CMODE_LEAVE) continue;
-        if ((int)i == gChaseCar) continue;
-        if (c.checked) continue;
+        if (!targetable(c, (int)i)) continue;
         V3 d = c.pos - PL.pos; float dd = len(d);
-        if (dd > (parked ? 45.f : 75.f) || dd < 2) continue;
+        if (dd > (parked ? 50.f : 80.f) || dd < 2) continue;
         float cs = dot(d * (1 / dd), f);
-        if (!parked && cs < 0.75f) continue;
-        if (parked && cs < -0.2f) continue;
-        float score = dd * (c.viol > 0 ? 0.4f : 1.0f) * (c.wanted ? 0.3f : 1.0f);
+        // рядом (до 25 м) — в любом направлении, дальше — в широком конусе впереди
+        if (dd > 25 && cs < (parked ? -0.2f : 0.3f)) continue;
+        float score = dd * (c.viol > 0 ? 0.4f : 1.0f) * (c.wanted ? 0.3f : 1.0f) * (cs > 0.8f ? 0.8f : 1.0f);
         if (score < best) { best = score; gTarget = (int)i; }
     }
 }
@@ -7101,6 +7107,7 @@ static void drawDriveHUD() {
         if ((int)i == gChaseCar) worldLabel(top, "БЕГЛЕЦ", C_RED, u * 1.1f);
         else if (c.mode == CMODE_STOPPED && c.caseIdx >= 0) worldLabel(top, "ЖДЁТ ПРОВЕРКИ", C_YELLOW, u * 0.9f);
         else if (c.wanted && d < 100) worldLabel(top, "РОЗЫСК", RGBA(255, 140, 0), u * 1.0f);
+        else if (c.checked && !c.vanish && d < 50 && (c.mode == CMODE_DRIVE || c.mode == CMODE_LEAVE)) worldLabel(top, "ПРОВЕРЕН", RGBA(170, 180, 190), u * 0.8f);
         else if (c.viol > 0 && d < 110 && c.mode == CMODE_DRIVE) worldLabel(top, c.viol == 3 ? "! КРАСНЫЙ" : fmt("! %d", (int)c.violSpeed).c_str(), RGBA(255, 90, 80), u * 1.0f);
     }
     if (gTarget >= 0) {
@@ -7251,6 +7258,30 @@ static void drawDriveHUD() {
     } else if (gInspect >= 0) {
         UI.text(SW / 2, sy - u * 18, "ОСТАНОВИСЬ РЯДОМ С МАШИНОЙ", u * 1.0f, C_YELLOW, 1, true);
     }
+    // выбор цели касанием по машине (вне зон кнопок)
+    for (Tap& t : TAPS) {
+        if (t.used) continue;
+        bool inSteer = t.x < rbx + b * 1.2f && t.y > by - b * 0.35f;
+        bool inPedals = t.x > bkx - b * 0.2f && t.y > ay - b * 0.1f;
+        if (inSteer || inPedals) continue;
+        int bi = -1; float bd = 1e9f; bool checkedHit = false;
+        for (size_t i = 0; i < CARS.size(); i++) {
+            const AICar& c = CARS[i]; if (!c.alive) continue;
+            float px, py, pz;
+            if (!R3.project(c.pos + V3(0, CM[c.model].height * 0.5f, 0), px, py, pz)) continue;
+            float r = std::max(u * 22, CM[c.model].radius * R3.focal / pz * 0.8f);
+            float dd = sqrtf((px - t.x) * (px - t.x) + (py - t.y) * (py - t.y));
+            if (dd < r && dd < bd) { bd = dd; bi = (int)i; }
+        }
+        if (bi < 0) continue;
+        t.used = true;
+        if (targetable(CARS[bi], bi) && dist2d(CARS[bi].pos, PL.pos) < 100) { gManualTarget = bi; gManualId = CARS[bi].id; gTarget = bi; sfx(SFX_CLICK); }
+        else if (CARS[bi].checked) toast("ЭТОТ ВОДИТЕЛЬ УЖЕ ПРОВЕРЕН", 0, 2);
+        else if (CARS[bi].mode == CMODE_STOPPED || CARS[bi].mode == CMODE_PULLOVER) toast("МАШИНА УЖЕ ОСТАНАВЛИВАЕТСЯ", 0, 2);
+        else if (dist2d(CARS[bi].pos, PL.pos) >= 100) toast("СЛИШКОМ ДАЛЕКО — ПОДЪЕДЬ БЛИЖЕ", 0, 2);
+        (void)checkedHit;
+    }
+    if (gTarget < 0 && gInspect < 0 && gChaseCar < 0) UI.text(ax + ab * 0.5f - ab * 0.56f, ay - u * 12, "НАЖМИ НА МАШИНУ", u * 0.8f, RGBA(255, 255, 255, 200), 1, true);
     // ввод
     gIn.steer = (rh ? 1.f : 0.f) - (lh ? 1.f : 0.f);
     gIn.throttle = gas ? 1.f : 0.f; gIn.brake = brk ? 1.f : 0.f;
@@ -7958,8 +7989,8 @@ static void frame(float dt) {
         case SC_MAP: drawMap(); for (size_t i = 0; i < TOASTS.size();) { TOASTS[i].t -= dt; if (TOASTS[i].t <= 0) TOASTS.erase(TOASTS.begin() + i); else i++; } break;
         case SC_SUMMARY: drawSummary(dt); break;
         case SC_DRIVE: {
-            // клавиатура (ПК)
-            updateDrive(dt);
+            // физика подшагами: при низком FPS игра не замедляется
+            { int n = (int)ceilf(dt / (1.0f / 30)); if (n < 1) n = 1; if (n > 4) n = 4; for (int k = 0; k < n && gScreen == SC_DRIVE; k++) updateDrive(dt / n); }
             if (gScreen != SC_DRIVE) { updateCamera(dt, false); drawWorldScene(dt, true, gCamMode == 1); break; }
             updateCamera(dt, false);
             drawWorldScene(dt, true, gCamMode == 1);
@@ -8051,7 +8082,7 @@ int main(int argc, char** argv) {
         Uint64 now = SDL_GetPerformanceCounter();
         float dt = (float)((now - prev) / (double)SDL_GetPerformanceFrequency());
         prev = now;
-        if (dt > 0.05f) dt = 0.05f;
+        if (dt > 0.12f) dt = 0.12f;
         if (dt < 0.001f) dt = 0.001f;
 #ifdef GAISHNIK_TEST
         testHook(frameNo, dt);
