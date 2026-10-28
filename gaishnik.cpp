@@ -5361,10 +5361,10 @@ static void drawParts() {
 // ---------------------------------------------------------------------
 struct PatrolSpec { const char* name; int model; int price; int rank; float vmax, accel, brake, grip, mass; const char* desc; };
 static const PatrolSpec PATROL[4] = {
-    {"ЖИГУЛИ", MD_CLASSIC, 0, 0, 150, 3.0f, 8.0f, 0.82f, 1.0f, "СТАРАЯ ДОБРАЯ «СЕМЁРКА». НЕ БЫСТРАЯ, НО СВОЯ."},
-    {"СЕДАН", MD_SEDAN, 60000, 2, 200, 4.4f, 9.5f, 0.95f, 1.2f, "СОВРЕМЕННЫЙ СЕДАН. КОМФОРТ И ДИНАМИКА."},
-    {"ВНЕДОРОЖНИК", MD_BIGSUV, 140000, 4, 205, 4.8f, 9.0f, 0.9f, 2.2f, "ТЯЖЁЛЫЙ. ЛЕГКО ПРИЖИМАЕТ БЕГЛЕЦОВ."},
-    {"МОЩНЫЙ СЕДАН", MD_SPORTSEDAN, 190000, 6, 265, 7.5f, 11.5f, 1.08f, 1.3f, "ПЕРЕХВАТЧИК. ОТ НЕГО НЕ УЙТИ."}};
+    {"ЖИГУЛИ", MD_CLASSIC, 0, 0, 175, 4.8f, 10.0f, 0.95f, 1.0f, "СТАРАЯ ДОБРАЯ «СЕМЁРКА» С ФОРСИРОВАННЫМ МОТОРОМ."},
+    {"СЕДАН", MD_SEDAN, 60000, 2, 230, 6.3f, 11.5f, 1.05f, 1.2f, "СОВРЕМЕННЫЙ СЕДАН. КОМФОРТ И ДИНАМИКА."},
+    {"ВНЕДОРОЖНИК", MD_BIGSUV, 140000, 4, 220, 6.0f, 11.0f, 1.0f, 2.2f, "ТЯЖЁЛЫЙ. ЛЕГКО ПРИЖИМАЕТ БЕГЛЕЦОВ."},
+    {"МОЩНЫЙ СЕДАН", MD_SPORTSEDAN, 190000, 6, 290, 9.0f, 13.5f, 1.18f, 1.3f, "ПЕРЕХВАТЧИК. ОТ НЕГО НЕ УЙТИ."}};
 enum Upg { U_ENGINE, U_BRAKES, U_TIRES, U_LIGHTS, U_RADAR, U_CAMS, U_COUNT };
 static const char* UPG_NAMES[U_COUNT] = {"ДВИГАТЕЛЬ", "ТОРМОЗА", "ШИНЫ", "МИГАЛКИ", "РАДАР", "КАМЕРЫ"};
 static const char* UPG_DESC[U_COUNT] = {"СКОРОСТЬ И РАЗГОН", "КОРОЧЕ ТОРМОЗНОЙ ПУТЬ", "ЛУЧШЕ СЦЕПЛЕНИЕ", "ВОДИТЕЛИ ЧАЩЕ ПОДЧИНЯЮТСЯ", "ДАЛЬШЕ ЗАМЕР СКОРОСТИ", "БОЛЬШЕ КАМЕР НА КАРТЕ"};
@@ -5426,33 +5426,59 @@ static void updatePlayer(float dt, const Input& in) {
     float lim = 60;
     PL.offroad = !onRoadSurface(PL.pos, &lim);
     PL.limitKmh = lim;
-    if (PL.offroad) vmax *= 0.55f;
+    if (PL.siren) vmax *= 1.08f;          // режим преследования
+    if (PL.offroad) vmax *= 0.72f;
     float thr = in.throttle, br = in.brake;
     PL.reverse = false;
+    float sp = std::max(PL.speed, 0.f);
     if (thr > 0.01f) {
         if (PL.speed < -0.3f) PL.speed = approach(PL.speed, 0, brk * dt * thr);
-        else PL.speed += acc * (1 - std::max(PL.speed, 0.f) / vmax) * thr * dt * (PL.speed < 8 ? 1.15f : 1.0f);
+        else {
+            // тяга падает квадратично — машина уверенно набирает высокую скорость
+            float k = 1 - (sp / vmax) * (sp / vmax);
+            if (k < 0) k = 0;
+            PL.speed += acc * k * thr * dt * (sp < 12 ? 1.25f : 1.0f);
+        }
     }
     if (br > 0.01f) {
         if (PL.speed > 0.3f) PL.speed = std::max(0.f, PL.speed - brk * br * dt);
-        else { PL.speed = std::max(PL.speed - 3.2f * dt * br, -7.0f); PL.reverse = true; }
+        else { PL.speed = std::max(PL.speed - 4.0f * dt * br, -9.0f); PL.reverse = true; }
     }
     if (thr <= 0.01f && br <= 0.01f) {
-        float drag = (0.5f + fabsf(PL.speed) * 0.018f) * dt;
+        float drag = (0.4f + fabsf(PL.speed) * 0.012f) * dt;
         PL.speed = approach(PL.speed, 0, drag);
     }
-    if (PL.offroad) PL.speed = approach(PL.speed, 0, fabsf(PL.speed) * 0.35f * dt);
+    if (PL.offroad) PL.speed = approach(PL.speed, 0, fabsf(PL.speed) * 0.18f * dt);
     if (PL.speed > vmax) PL.speed = approach(PL.speed, vmax, 3 * dt);
-    float maxSteer = 0.58f / (1 + fabsf(PL.speed) * 0.05f);
+    float av = fabsf(PL.speed);
+    // руль: быстрый отклик на малой скорости, мягче на большой, быстрый возврат в ноль
+    float maxSteer = 0.62f / (1 + av * 0.028f);
     float tgt = in.steer * maxSteer;
-    float rate = (fabsf(tgt) < fabsf(PL.steer) ? 4.0f : 2.4f);
+    float rate = fabsf(tgt) < fabsf(PL.steer) || tgt * PL.steer < 0 ? 6.0f : (3.6f - std::min(av, 35.f) * 0.045f);
     PL.steer = approach(PL.steer, tgt, rate * dt);
     float yr = PL.speed * tanf(PL.steer) / M.wheelbase;
-    float maxLat = 9.81f * grip;
+    // аркадное сцепление: держит ~1.3–1.7 g
+    float maxLat = 9.81f * grip * 1.45f;
     PL.sliding = false;
-    if (fabsf(yr * PL.speed) > maxLat && fabsf(PL.speed) > 1) { yr = (yr > 0 ? 1 : -1) * maxLat / fabsf(PL.speed); PL.sliding = true; }
-    PL.yawRate = yr;
+    if (fabsf(yr * PL.speed) > maxLat && av > 1) {
+        float lim2 = maxLat / av;
+        PL.sliding = fabsf(yr) > lim2 * 1.15f && av > 12;
+        yr = (yr > 0 ? 1 : -1) * lim2;
+    }
+    // сглаживание скорости поворота — без рывков от цифровых кнопок
+    PL.yawRate = approach(PL.yawRate, yr, 9.0f * dt * std::max(1.0f, fabsf(yr - PL.yawRate)));
+    yr = PL.yawRate;
     PL.yaw = wrapAngle(PL.yaw + yr * dt);
+    // помощь удержания полосы: без руля машина мягко выравнивается вдоль дороги
+    if (fabsf(in.steer) < 0.01f && av > 6 && !PL.offroad) {
+        RoadHit h = nearestRoad(PL.pos);
+        if (h.edge >= 0 && !h.onNode) {
+            float ry = EDGES[h.edge].yaw;
+            float e1 = wrapAngle(ry - PL.yaw), e2 = wrapAngle(ry + PI - PL.yaw);
+            float err = fabsf(e1) < fabsf(e2) ? e1 : e2;
+            if (fabsf(err) < 0.3f) PL.yaw = wrapAngle(PL.yaw + clampf(err, -1, 1) * 1.6f * dt);
+        }
+    }
     PL.pos += fwdOf(PL.yaw) * (PL.speed * dt);
     // столкновения со статикой
     V3 cs[5]; int n = carCircles(PL.pos, PL.yaw, PL.halfW, PL.halfL, cs);
@@ -6566,7 +6592,7 @@ static void updateCamera(float dt, bool snap) {
     float back = 4.8f + M.halfL * 1.0f + fabsf(PL.speed) * 0.04f, up = 1.6f + M.height * 0.9f;
     float yawT = PL.yaw; if (PL.speed < -1) yawT = PL.yaw;
     if (snap) gCamYaw = yawT;
-    gCamYaw = wrapAngle(gCamYaw + wrapAngle(yawT - gCamYaw) * clampf(dt * 4.0f, 0, 1));
+    gCamYaw = wrapAngle(gCamYaw + wrapAngle(yawT - gCamYaw) * clampf(dt * 5.5f, 0, 1));
     V3 target = PL.pos - fwdOf(gCamYaw) * back + V3(0, up, 0);
     if (snap) gCamPos = target; else gCamPos = lerp3(gCamPos, target, clampf(dt * 8, 0, 1));
     // не уходить под землю/в стены
