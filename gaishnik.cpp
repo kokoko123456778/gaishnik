@@ -692,10 +692,11 @@ struct Synth {
     // постоянные голоса
     float engRpm = 0, engLoad = 0, engVol = 0;
     float siren = 0, sirenMode = 0;   // 0 выкл, 1 вой
-    float rain = 0, ambient = 0, screech = 0, wiper = 0;
+    float rain = 0, ambient = 0, screech = 0, wiper = 0, wind = 0;
     float master = 0.8f;
     bool muted = false;
     // состояние
+    float wLp = 0, wLp2 = 0, wPh = 0;
     float ePh = 0, ePh2 = 0, eLp = 0, sPh = 0, sT = 0, nLp = 0, nLp2 = 0, scLp = 0, sirenEnv = 0;
     uint32_t noise = 22222;
     Voice vo[16];
@@ -736,6 +737,14 @@ static void audioCallback(void*, Uint8* stream, int len) {
         s.nLp += (wn - s.nLp) * 0.35f;
         s.nLp2 += (wn - s.nLp2) * 0.02f;
         smp += s.nLp * s.rain * 0.08f + s.nLp2 * s.ambient * 0.25f;
+        // встречный ветер и гул шин: растут с квадратом скорости
+        if (s.wind > 0.005f) {
+            s.wLp += (wn - s.wLp) * (0.04f + s.wind * 0.18f);
+            s.wLp2 += (s.wLp - s.wLp2) * 0.08f;
+            s.wPh += (90 + s.wind * 70) * dt; if (s.wPh > 1) s.wPh -= 1;
+            float roar = (s.wPh < 0.5f ? 1.f : -1.f) * 0.15f + s.wLp2 * 0.9f;
+            smp += (s.wLp * 0.55f + roar * 0.6f) * s.wind * 0.2f;
+        }
         // визг шин
         if (s.screech > 0.01f) {
             s.scLp += (wn - s.scLp) * 0.6f;
@@ -37119,6 +37128,7 @@ struct PlayerCar {
     int spec = 0; V3 pos; float yaw = 0, speed = 0, steer = 0, yawRate = 0;
     float pitch = 0, roll = 0, pv = 0, rv = 0, spin = 0;
     bool siren = false, flash = false, brakeLight = false, reverse = false, offroad = false, sliding = false;
+    int gear = 1;
     float lastSpeed = 0, rpm = 0, load = 0, exhaustT = 0, hitCooldown = 0, limitKmh = 60;
     float velYaw = 0; bool velInit = false;   // направление скорости (для заноса)
     float halfW = 0.85f, halfL = 2.1f;
@@ -37254,10 +37264,14 @@ static void updatePlayer(float dt, const Input& in) {
     PL.brakeLight = br > 0.05f && PL.speed > 0.2f;
     // двигатель: условные передачи
     float kmh = fabsf(PL.speed) * 3.6f;
-    float gearTop[5] = {25, 50, 80, 115, 400};
-    int g = 0; while (g < 4 && kmh > gearTop[g]) g++;
-    float lo = g == 0 ? 0 : gearTop[g - 1], hi = gearTop[g] > 300 ? lo + 120 : gearTop[g];
-    float rpmT = clampf(0.15f + 0.85f * (kmh - lo) / (hi - lo), 0.12f, 1.0f);
+    // 6 передач, растянутых под максималку машины: мотор продолжает «расти» до самого верха
+    float vmk = vmax * 3.6f;
+    float gearTop[6] = {vmk * 0.12f, vmk * 0.24f, vmk * 0.38f, vmk * 0.54f, vmk * 0.74f, vmk * 1.02f};
+    int g = 0; while (g < 5 && kmh > gearTop[g]) g++;
+    float lo = g == 0 ? 0 : gearTop[g - 1] * 0.92f, hi = gearTop[g];
+    float rpmT = clampf(0.3f + 0.7f * (kmh - lo) / (hi - lo), 0.12f, 1.0f);
+    if (g == 5) rpmT = clampf(0.45f + 0.6f * (kmh - lo) / (hi - lo), 0.12f, 1.05f);
+    PL.gear = g + 1;
     if (kmh < 2) rpmT = 0.12f + thr * 0.5f;
     PL.rpm = approach(PL.rpm, rpmT, 3 * dt);
     PL.load = approach(PL.load, thr, 4 * dt);
@@ -38487,16 +38501,25 @@ static void updateCamera(float dt, bool snap) {
         gCamPos = mul(rot, V3(-0.37f * M.halfW / 0.9f, M.roofY * 0.8f, (M.maxZ + M.minZ) * 0.5f - 0.05f)) + PL.pos;
         gCamYaw = PL.yaw; gCamPitch = -0.05f - PL.pitch;
         float spk = clampf((fabsf(PL.speed) - 15) / 35, 0, 1);
-        R3.setCamera(gCamPos + V3(0, sinf(gTime * 27.0f) * spk * spk * 0.02f, 0), gCamYaw, gCamPitch, 70 + clampf((fabsf(PL.speed) - 8) * 0.35f, 0, 16));
+        float hk = clampf((fabsf(PL.speed) * 3.6f - 130) / 150, 0, 1);   // 130..280 км/ч — эффекты продолжают расти
+        float vib = spk * spk * 0.02f + hk * 0.035f;
+        V3 jit(sinf(gTime * 41.0f) * hk * 0.012f, sinf(gTime * 27.0f) * vib + sinf(gTime * 63.0f) * hk * 0.01f, 0);
+        R3.setCamera(gCamPos + jit, gCamYaw, gCamPitch, 70 + clampf((fabsf(PL.speed) - 8) * 0.35f, 0, 14) + hk * 12);
         return;
     }
     float spdK = clampf((fabsf(PL.speed) - 15) / 35, 0, 1);   // 0 медленно .. 1 очень быстро
-    float back = 4.8f + M.halfL * 1.0f - spdK * 0.8f, up = 1.6f + M.height * 0.9f - spdK * 0.35f;
+    float hk = clampf((fabsf(PL.speed) * 3.6f - 130) / 150, 0, 1);   // сверхскорость: 130..280 км/ч
+    float back = 4.8f + M.halfL * 1.0f - spdK * 0.8f - hk * 1.1f, up = 1.6f + M.height * 0.9f - spdK * 0.35f - hk * 0.5f;
     float yawT = PL.yaw; if (PL.speed < -1) yawT = PL.yaw;
     if (snap) gCamYaw = yawT;
     gCamYaw = wrapAngle(gCamYaw + wrapAngle(yawT - gCamYaw) * clampf(dt * 5.5f, 0, 1));
     V3 target = PL.pos - fwdOf(gCamYaw) * back + V3(0, up, 0);
-    if (snap) gCamPos = target; else gCamPos = lerp3(gCamPos, target, clampf(dt * 8, 0, 1));
+    // камера сначала переносится вместе с машиной, а сглаживается только остаток —
+    // иначе на скорости она отстаёт на v/8 метров и машина «уплывает» вдаль
+    static V3 lastPl = PL.pos;
+    V3 moved = PL.pos - lastPl; lastPl = PL.pos;
+    if (snap || len(moved) > 30) gCamPos = target;
+    else { gCamPos += moved; gCamPos = lerp3(gCamPos, target, clampf(dt * 8, 0, 1)); }
     // не уходить под землю/в стены
     V3 p = gCamPos; collideStatic(p, 0.4f, nullptr); gCamPos = p;
     if (gCamPos.y < 0.6f) gCamPos.y = 0.6f;
@@ -38505,9 +38528,9 @@ static void updateCamera(float dt, bool snap) {
     float pitch = atan2f(d.y, sqrtf(d.x * d.x + d.z * d.z));
     gCamPitch = pitch;
     // тряска на большой скорости и расширение обзора
-    float shake = spdK * spdK * 0.05f + (PL.offroad ? clampf(fabsf(PL.speed) / 20, 0, 1) * 0.06f : 0);
-    V3 sp = gCamPos + V3(sinf(gTime * 31.0f) * shake, sinf(gTime * 23.0f + 1.3f) * shake * 0.8f, 0);
-    R3.setCamera(sp, gCamYaw, gCamPitch, 62 + clampf((fabsf(PL.speed) - 8) * 0.45f, 0, 22));
+    float shake = spdK * spdK * 0.05f + hk * 0.06f + (PL.offroad ? clampf(fabsf(PL.speed) / 20, 0, 1) * 0.06f : 0);
+    V3 sp = gCamPos + V3(sinf(gTime * 31.0f) * shake + sinf(gTime * 57.0f) * hk * 0.02f, sinf(gTime * 23.0f + 1.3f) * shake * 0.8f + sinf(gTime * 71.0f) * hk * 0.015f, 0);
+    R3.setCamera(sp, gCamYaw, gCamPitch, 62 + clampf((fabsf(PL.speed) - 8) * 0.45f, 0, 20) + hk * 14);
 }
 
 // ---------------------------------------------------------------------
@@ -39207,7 +39230,8 @@ static void updateDrive(float dt) {
         }
     }
     // звук
-    SY.engRpm = PL.rpm; SY.engLoad = PL.load; SY.engVol = 1; SY.siren = PL.siren ? 1.f : 0.f;
+    SY.engRpm = PL.rpm; SY.engLoad = PL.load; SY.engVol = 1;
+    { float wv = fabsf(PL.speed) / 70; SY.wind = clampf(wv * wv, 0, 1.4f) * (gCamMode == 1 ? 0.75f : 1.f); } SY.siren = PL.siren ? 1.f : 0.f;
     SY.rain = L.rain; SY.ambient = districtAt(PL.pos) == 0 ? 0.25f : 0.12f;
     SY.screech = PL.sliding ? clampf(fabsf(PL.speed) / 20, 0, 1) : 0;
     if (SHF.minutes >= SHF.endMin) endShift();
@@ -39272,18 +39296,27 @@ static void worldLabel(const V3& p, const char* s, SDL_Color c, float sc) {
 }
 
 static void drawSpeedLines() {
-    float k = clampf((fabsf(PL.speed) * 3.6f - 90) / 90, 0, 1);
+    float kmh = fabsf(PL.speed) * 3.6f;
+    float k = clampf((kmh - 90) / 90, 0, 1);
     if (k <= 0) return;
+    float hk = clampf((kmh - 170) / 110, 0, 1);    // на 170..280 км/ч — гуще, длиннее, быстрее + затемнение по краям
+    if (hk > 0) {
+        int a = (int)(70 * hk);
+        UI.rectGH(0, 0, SW * 0.2f, SH, RGBA(0, 0, 0, a), RGBA(0, 0, 0, 0));
+        UI.rectGH(SW * 0.8f, 0, SW * 0.2f, SH, RGBA(0, 0, 0, 0), RGBA(0, 0, 0, a));
+        UI.rectG(0, 0, SW, SH * 0.18f, RGBA(0, 0, 0, a / 2), RGBA(0, 0, 0, 0));
+    }
     float cx = SW * 0.5f, cy = SH * 0.42f;
-    for (int i = 0; i < 28; i++) {
+    int nLines = 28 + (int)(44 * hk);
+    for (int i = 0; i < nLines; i++) {
         uint32_t h = hash32(i * 977 + 3);
         float ang = (h % 6283) / 1000.0f;
-        float ph = fmodf(gTime * (1.6f + (h >> 12) % 100 / 60.0f) + (h >> 20) % 100 / 100.0f, 1.0f);
-        float r0 = SH * (0.45f + ph * 0.7f), r1 = r0 + SH * (0.08f + 0.18f * k);
+        float ph = fmodf(gTime * (1.6f + (h >> 12) % 100 / 60.0f) * (1 + hk * 1.2f) + (h >> 20) % 100 / 100.0f, 1.0f);
+        float r0 = SH * (0.45f - hk * 0.12f + ph * 0.7f), r1 = r0 + SH * (0.08f + 0.18f * k + 0.2f * hk);
         float ca = cosf(ang), sa = sinf(ang);
         float x0 = cx + ca * r0 * 1.6f, y0 = cy + sa * r0, x1 = cx + ca * r1 * 1.6f, y1 = cy + sa * r1;
         if (y0 > SH * 0.8f) continue;
-        UI.line(x0, y0, x1, y1, std::max(1.5f, SH / 400.0f), RGBA(255, 255, 255, (int)(70 * k * (1 - ph))));
+        UI.line(x0, y0, x1, y1, std::max(1.5f, SH / 400.0f) * (1 + hk * 0.6f), RGBA(255, 255, 255, (int)((70 + 50 * hk) * k * (1 - ph))));
     }
 }
 static void drawDriveHUD() {
@@ -39753,12 +39786,9 @@ static void drawCockpitOverlay() {
         UI.ellipse(kx, ky + gr * 0.1f, gap + gr * 1.45f, gr * 1.45f, RGBA(10, 11, 13), 40);
         float sp = fabsf(PL.speed) * 3.6f;
         // условные передачи и обороты
-        static const float gearTop[6] = {28, 52, 82, 118, 160, 400};
-        int g = 0; while (g < 5 && sp > gearTop[g]) g++;
-        float lo = g == 0 ? 0 : gearTop[g - 1], hi = g == 5 ? std::max(gearTop[4] * 1.5f, 260.f) : gearTop[g];
-        float rpm = 850 + clampf((sp - lo) / (hi - lo), 0, 1) * (g == 5 ? 5200 : 5600) + (g == 0 ? 0 : 1300) * (sp > lo ? 1 : 0);
-        if (sp < 2) rpm = 850 + (gIn.throttle > 0 ? 1800 * gIn.throttle : 0);
-        cockpitGauge(kx - gap / 2, ky, gr, sp, 240, 6, 4, 999, "КМ/Ч", false, lit);
+        int g = PL.gear - 1;
+        float rpm = 300 + PL.rpm * 6600;
+        cockpitGauge(kx - gap / 2, ky, gr, sp, 300, 6, 5, 999, "КМ/Ч", false, lit);
         cockpitGauge(kx + gap / 2, ky, gr, rpm, 8000, 8, 2, 6500, "X1000", true, lit);
         // индикаторы между приборами
         float ix = kx, iy = ky - gr * 0.55f;
@@ -40410,7 +40440,7 @@ static void drawMenu(float dt) {
     if (button(bx + bw * 0.52f, by, bw * 0.48f, bh, "НАСТРОЙКИ", C_GRAY, u * 1.0f)) { gSettingsReturn = SC_MENU; gScreen = SC_SETTINGS; }
     by += bh + u * 6;
     if (button(bx, by, bw, bh * 0.85f, "ВЫХОД", RGBA(110, 40, 40), u * 1.1f) || gBackPressed) { gBackPressed = false; gScreen = SC_EXITCONFIRM; }
-    SY.engVol = 0.3f; SY.engRpm = 0.12f; SY.engLoad = 0; SY.siren = 0; SY.rain = 0; SY.ambient = 0.15f; SY.screech = 0;
+    SY.engVol = 0.3f; SY.engRpm = 0.12f; SY.engLoad = 0; SY.siren = 0; SY.rain = 0; SY.ambient = 0.15f; SY.screech = 0; SY.wind = 0;
 }
 static void drawExitConfirm(float dt) {
     float u = U();
@@ -40468,7 +40498,7 @@ static void drawPause() {
     by += bh + u * 6;
     if (button(x + u * 10, by, (w - u * 24) / 2, bh, "НАСТРОЙКИ", C_GRAY, u * 1.0f)) { gSettingsReturn = SC_PAUSE; gScreen = SC_SETTINGS; }
     if (button(x + u * 14 + (w - u * 24) / 2, by, (w - u * 24) / 2, bh, "ЗАКОНЧИТЬ", RGBA(150, 50, 40), u * 1.0f)) { endShift(); }
-    SY.engVol = 0; SY.siren = 0; SY.screech = 0;
+    SY.engVol = 0; SY.siren = 0; SY.screech = 0; SY.wind = 0;
 }
 
 // ---------------------------------------------------------------------
@@ -40553,7 +40583,7 @@ static void drawSettings(float dt) {
     if (SV.gripMul < 0.85f) UI.text(tx, ty, "ВНИМАНИЕ: МАШИНУ БУДЕТ ЗАНОСИТЬ", u * 0.9f, C_YELLOW);
     if (button(mx + u * 10, mt + H - u * 32, u * 110, u * 24, "СБРОС", RGBA(110, 40, 40), u * 1.1f)) { SV.steerMul = 1; SV.gripMul = 1; SV.steerSpd = 1; SV.laneAssist = false; SV.tiltSens = 1; }
     if (button(mx + W - u * 130, mt + H - u * 32, u * 120, u * 24, "ГОТОВО", C_BLUE, u * 1.2f) || gBackPressed) { gBackPressed = false; saveGame(); gScreen = gSettingsReturn; }
-    SY.engVol = gSettingsReturn == SC_MENU ? 0.3f : 0; SY.siren = 0; SY.screech = 0;
+    SY.engVol = gSettingsReturn == SC_MENU ? 0.3f : 0; SY.siren = 0; SY.screech = 0; SY.wind = 0;
 }
 static void drawSummary(float dt) {
     float u = U();
@@ -40700,7 +40730,7 @@ static void frame(float dt) {
             if (gKeys[SDL_SCANCODE_RETURN] && gInspect >= 0 && fabsf(PL.speed) < 2) { gScreen = SC_DOCS; PL.speed = 0; gKeys[SDL_SCANCODE_RETURN] = false; }
         } break;
         case SC_DOCS: case SC_DECIDE: case SC_RESULT: case SC_PAUSE: {
-            SY.engLoad = 0; SY.screech = 0; SY.siren = 0;
+            SY.engLoad = 0; SY.screech = 0; SY.wind = 0; SY.siren = 0;
             if (gScreen != SC_PAUSE && (gInspect < 0 || gInspect >= (int)CARS.size() || !CARS[gInspect].alive || CARS[gInspect].caseIdx < 0) && gScreen != SC_RESULT) { gScreen = SC_DRIVE; break; }
             updateCamera(0, false);
             drawWorldScene(dt, true, gCamMode == 1);
