@@ -37026,7 +37026,7 @@ struct AICar {
     int edge = 0, dir = 0, lane = 0; float s = 0;
     bool turning = false; float tt = 0, tlen = 1; V3 b0, b1, b2; int nEdge = 0, nDir = 0, nLane = 0;
     int planEdge = -1, planDir = 0;
-    float lat = 0, latTarget = 0;
+    float lat = 0, latTarget = 0, latV = 0; int yieldMode = -1; float pullWait = 0;
     V3 pos; float yaw = 0, speed = 0, desired = 1;
     float pitch = 0, roll = 0, pv = 0, rv = 0, spin = 0, steerVis = 0, lastSpeed = 0, lastYaw = 0;
     int mode = CMODE_DRIVE; float modeT = 0;
@@ -37390,8 +37390,9 @@ static void carComputePose(AICar& c) {
         V3 st, f, r; float y; laneFrame(e, c.dir, st, f, r, y);
         c.pos = st + f * c.s + r * (laneOffset(e, c.lane) + c.lat);
         // плавный разворот при смене бокового смещения
-        float dl = c.latTarget - c.lat;
-        c.yaw = wrapAngle(y + clampf(dl * 0.12f, -0.25f, 0.25f) * (c.speed > 1 ? 1 : c.speed) + c.yawOff);
+        // курс по реальной боковой скорости — без рывков при смене цели
+        float yo = clampf(atan2f(c.latV, std::max(c.speed, 3.0f)), -0.3f, 0.3f);
+        c.yaw = wrapAngle(y + yo * (c.speed > 1 ? 1 : c.speed) + c.yawOff);
     }
 }
 
@@ -37437,7 +37438,7 @@ static int allocPlate(std::string& str, int& region, bool police = false) {
 }
 
 static void initCarOnLane(AICar& c, int edge, int dir, int lane, float s) {
-    c.edge = edge; c.dir = dir; c.lane = lane; c.s = s; c.turning = false; c.lat = 0; c.latTarget = 0;
+    c.edge = edge; c.dir = dir; c.lane = lane; c.s = s; c.turning = false; c.lat = 0; c.latTarget = 0; c.latV = 0;
     c.planEdge = -1; planNext(c);
     carComputePose(c);
     c.lastYaw = c.yaw;
@@ -37559,7 +37560,7 @@ static void carAccel(AICar& c, float v0, float gap, float vl, float dt, float am
     c.brake = acc < -1.2f || (c.speed < 0.3f && v0 > 0.5f);
 }
 
-static void tryLaneChange(AICar& c, int newLane) {
+static void tryLaneChange(AICar& c, int newLane, bool ignorePlayer = false) {
     const Edge& e = EDGES[c.edge];
     if (newLane < 0 || newLane >= e.lanes || newLane == c.lane || c.turning) return;
     if (c.s > e.slen - 25) return;
@@ -37573,7 +37574,7 @@ static void tryLaneChange(AICar& c, int newLane) {
     }
     V3 d = PL.pos - c.pos; float along = dot(d, fwdOf(c.yaw)); float lat = dot(d, rightOf(c.yaw));
     float wantLat = (newLane - c.lane) * e.laneW;
-    if (fabsf(lat - wantLat) < 2.5f && along > -12 && along < 22) return;
+    if (!ignorePlayer && fabsf(lat - wantLat) < 2.5f && along > -12 && along < 22) return;
     c.lat += (c.lane - newLane) * e.laneW;
     c.lane = newLane;
 }
@@ -37617,7 +37618,7 @@ static void updateAICar(AICar& c, int idx, float dt) {
     if (c.mode == CMODE_BLOCK) { c.speed = 0; return; }
     if (c.mode == CMODE_STOPPED) {
         c.speed = approach(c.speed, 0, 6 * dt); c.blink = 2; c.brake = true;
-        c.lat = approach(c.lat, c.latTarget, 1.0f * dt);
+        c.lat = approach(c.lat, c.latTarget, 1.0f * dt); c.latV = 0;
         carComputePose(c);
         return;
     }
@@ -37627,11 +37628,15 @@ static void updateAICar(AICar& c, int idx, float dt) {
         if (c.trail.empty() || dist2d(c.trail.back(), c.pos) > 4) { c.trail.push_back(c.pos); if (c.trail.size() > 800) c.trail.erase(c.trail.begin(), c.trail.begin() + 100); }
     }
     if (c.mode == CMODE_PULLOVER) {
-        // в крайнюю правую полосу и на обочину
-        if (!c.turning && c.lane < e.lanes - 1) tryLaneChange(c, e.lanes - 1);
-        if (!c.turning) c.latTarget = shoulderLat(c);
+        // сначала перестроиться в правый ряд, и только оттуда — на обочину (не через соседнюю полосу)
+        if (!c.turning && c.lane < e.lanes - 1) {
+            c.pullWait += dt;
+            tryLaneChange(c, e.lanes - 1, c.pullWait > 2.5f);   // инспектор сзади пропускает
+        }
+        bool rightLane = c.lane >= e.lanes - 1;
+        if (!c.turning) c.latTarget = rightLane ? shoulderLat(c) : 0.0f;
         c.blink = 1;
-        bool there = !c.turning && fabsf(c.lat - c.latTarget) < 0.6f;
+        bool there = !c.turning && rightLane && fabsf(c.lat - c.latTarget) < 0.6f;
         v0 = there ? 0.0f : std::max(4.0f, std::min(v0, 9.0f));
         if (there && c.speed < 0.25f) { c.mode = CMODE_STOPPED; c.modeT = 0; c.speed = 0; c.blink = 2; }
     }
@@ -37656,29 +37661,43 @@ static void updateAICar(AICar& c, int idx, float dt) {
         } else c.yieldWait = std::max(0.f, c.yieldWait - dt);
         if (c.yieldT > 0) {
             c.yieldT -= dt;
-            float relLat = dot(PL.pos - c.pos, rightOf(c.yaw));
-            bool playerInMyLane = fabsf(relLat) < 1.9f;
             if (!c.turning) {
                 if (e.lanes > 1 && c.lane < e.lanes - 1) { tryLaneChange(c, e.lanes - 1); c.latTarget = 0; v0 *= 0.85f; }   // просто освободить левую полосу
-                else if (e.lanes > 1) { c.latTarget = playerInMyLane ? shoulderLat(c) * 0.8f : 0.0f; v0 *= playerInMyLane ? 0.6f : 0.85f; }
+                else if (e.lanes > 1) {
+                    // решение «на обочину или нет» принимается один раз за манёвр (иначе машина мечется)
+                    if (c.yieldMode < 0) {
+                        float relLane = dot(PL.pos - c.pos, rightOf(c.yaw)) + c.lat;   // игрок относительно центра моей полосы
+                        c.yieldMode = fabsf(relLane) < 1.9f ? 1 : 0;
+                    }
+                    bool toShoulder = c.yieldMode == 1;
+                    c.latTarget = toShoulder ? shoulderLat(c) * 0.8f : 0.0f; v0 *= toShoulder ? 0.6f : 0.85f;
+                }
                 else { c.latTarget = std::min(shoulderLat(c), 0.6f); v0 *= 0.6f; }   // в городе — прижаться вправо, не на тротуар
             }
             c.blink = c.latTarget > 0.3f ? 1 : 0;
-            if (c.yieldT <= 0) { c.latTarget = 0; c.blink = 0; }
-        } else c.latTarget = 0;
-        // гудок игрока: машина впереди в той же полосе реагирует — уходит вправо или прибавляет
+            if (c.yieldT <= 0) { c.latTarget = 0; c.blink = 0; c.yieldMode = -1; }
+        } else { c.latTarget = 0; c.yieldMode = -1; }
+        // гудок игрока: водитель впереди в той же полосе замечает и реагирует
         if (gHornT > 0 && c.hornT <= 0 && !c.turning) {
             V3 dd = c.pos - PL.pos; float along = dot(dd, fwdOf(PL.yaw)), lat = fabsf(dot(dd, rightOf(PL.yaw)));
             bool sameDir = dot(fwdOf(c.yaw), fwdOf(PL.yaw)) > 0.7f;
-            if (sameDir && along > 2 && along < 40 && lat < 2.4f) c.hornT = 3.5f + (c.id % 5) * 0.1f;
+            if (sameDir && along > 2 && along < 45 && lat < 3.0f) c.hornT = 3.6f;
         }
         if (c.hornT > 0) {
+            float prev = c.hornT;
             c.hornT -= dt;
-            if (c.hornT < 3.0f && !c.turning && c.yieldT <= 0) {    // ~0.5 с на реакцию
-                if (e.lanes > 1 && c.lane < e.lanes - 1) tryLaneChange(c, e.lanes - 1);
-                v0 = std::max(v0, lim * 1.03f);
-                if (c.stuckD > 4) c.stuckD = std::max(c.stuckD, 42.f);   // застрял не на красный — скоро объедет
+            if (prev >= 3.0f && c.hornT < 3.0f) {   // ~0.6 с на реакцию
+                bool grumpy = (c.id % 5 == 0) && !PL.siren;   // кто-то в ответ сам сигналит и притормаживает
+                if (grumpy) {
+                    float dd = dist2d(c.pos, PL.pos);
+                    sfx(SFX_HORN, clampf(0.7f - dd / 80, 0.15f, 0.6f), 0, 0, 0.7f);
+                    c.hornT = 1.2f;          // короткое «торможение назло»
+                } else {
+                    c.yieldT = std::max(c.yieldT, 3.0f);   // прижаться вправо / уйти из полосы, пропустить
+                    if (c.speed < 0.5f && c.stuckD > 2) c.stuckD = std::max(c.stuckD, 43.f);   // стоит не на красный — тронется
+                }
             }
+            if (c.hornT < 1.2f && c.hornT > 0.4f && (c.id % 5 == 0) && !PL.siren) v0 *= 0.5f;
         }
         // место ДТП: «зеваки» притормаживают
         if (gAccActive && !c.crashed && dist2d(c.pos, gAccPos) < 70) v0 = std::min(v0, (e.highway ? 40.f : 25.f) / 3.6f);
@@ -37749,7 +37768,15 @@ static void updateAICar(AICar& c, int idx, float dt) {
     // беглец толкается
     if (c.mode == CMODE_FLEE && gap < 4 && c.speed < 6) { c.stuck += dt; if (c.stuck > 2.5f) { c.lat += 0; c.pressure += dt * 0.6f; } } else c.stuck = 0;
     // боковое смещение
-    c.lat = approach(c.lat, c.turning ? 0 : c.latTarget, (c.mode == CMODE_FLEE ? 3.2f : 1.8f) * dt);
+    {   // плавное боковое движение: скорость сноса нарастает и спадает постепенно
+        float tgt = c.turning ? 0 : c.latTarget;
+        bool fl = c.mode == CMODE_FLEE;
+        float maxV = fl ? 3.2f : 1.5f;
+        float wantV = clampf((tgt - c.lat) * (fl ? 1.6f : 0.9f), -maxV, maxV);
+        c.latV = approach(c.latV, wantV, (fl ? 7.0f : 2.0f) * dt);
+        c.lat += c.latV * dt;
+        if (fabsf(tgt - c.lat) < 0.03f && fabsf(c.latV) < 0.08f) { c.lat = tgt; c.latV = 0; }
+    }
     // движение по пути
     float ds = c.speed * dt;
     if (!c.turning) {
@@ -37769,7 +37796,7 @@ static void updateAICar(AICar& c, int idx, float dt) {
         c.tt += ds / c.tlen;
         if (c.tt >= 1) {
             float rem = (c.tt - 1) * c.tlen;
-            c.edge = c.nEdge; c.dir = c.nDir; c.lane = c.nLane; c.s = rem; c.turning = false; c.lat = 0;
+            c.edge = c.nEdge; c.dir = c.nDir; c.lane = c.nLane; c.s = rem; c.turning = false; c.lat = 0; c.latV = 0;
             c.planEdge = -1; planNext(c);
             if (c.mode == CMODE_DRIVE || c.mode == CMODE_FLEE) c.blink = 0;
         }
@@ -38516,7 +38543,7 @@ static int spawnCrashCar(int edge, int dir, int lane, float s, float lat, float 
     const CarModel& M = CM[c.model]; c.halfW = M.halfW; c.halfL = M.halfL;
     c.plate = allocPlate(c.plateStr, c.region);
     c.edge = edge; c.dir = dir; c.lane = lane; c.s = s; c.turning = false; c.planEdge = -1; planNext(c);
-    c.lat = c.latTarget = lat; c.yawOff = yawOff;
+    c.lat = c.latTarget = lat; c.latV = 0; c.yawOff = yawOff;
     c.mode = CMODE_STOPPED; c.crashed = true; c.checked = true; c.speed = 0; c.blink = 2;
     carComputePose(c); c.lastYaw = c.yaw;
     for (size_t i = 0; i < CARS.size(); i++) if (!CARS[i].alive) { CARS[i] = c; return (int)i; }
