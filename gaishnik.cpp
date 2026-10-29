@@ -4761,6 +4761,24 @@ static void drawRoads() {
             }
         }
     }
+    // 2б) заплатки и трещины на асфальте — подсказка глазу о скорости
+    for (size_t ei = 0; ei < EDGES.size(); ei++) {
+        const Edge& e = EDGES[ei];
+        float near0 = dot(cam - e.pa, e.dir);
+        if (dist2d(cam, e.pa + e.dir * clampf(near0, 0, e.slen)) > 120) continue;
+        V3 rr = rightOf(e.yaw);
+        float s0 = clampf(near0 - 110, 0, e.slen), s1 = clampf(near0 + 110, 0, e.slen);
+        for (float s = floorf(s0 / 5) * 5; s < s1; s += 5) {
+            uint32_t h = hash32((uint32_t)ei * 7919u + (uint32_t)(s / 5) * 104729u);
+            if ((h & 3) == 0) continue;
+            float lat = ((h >> 4) % 1000 / 1000.f * 2 - 1) * (e.halfW - 0.6f);
+            float ln = 0.4f + ((h >> 14) % 100) / 100.f * 1.0f, wd = 0.2f + ((h >> 21) % 100) / 100.f * 0.5f;
+            V3 c = e.pa + e.dir * (s + ((h >> 8) % 50) / 10.f) + rr * lat + V3(0, 0.035f, 0);
+            if (dist2d(c, cam) > 110) continue;
+            Col pc = ((h >> 28) & 1) ? asph * 0.86f : asph * 1.12f;
+            flatQuad(c - e.dir * ln - rr * wd, c + e.dir * ln - rr * wd, c + e.dir * ln + rr * wd, c - e.dir * ln + rr * wd, pc);
+        }
+    }
     // 3) разметка
     for (size_t ei = 0; ei < EDGES.size(); ei++) {
         const Edge& e = EDGES[ei];
@@ -4824,6 +4842,16 @@ static void drawRoads() {
 }
 
 // --- объекты ---
+// четырёхугольник, разбитый на плитки (для правильной сортировки крупных граней)
+static void quadSub(const V3& a, const V3& b, const V3& c, const V3& d, SDL_Color col, float bias, float tile = 1.2f) {
+    int nu = std::min(6, std::max(1, (int)ceilf(len(b - a) / tile))), nv = std::min(6, std::max(1, (int)ceilf(len(d - a) / tile)));
+    if (nu == 1 && nv == 1) { R3.quadW(a, b, c, d, col, 2, 0, bias); return; }
+    for (int j = 0; j < nv; j++) for (int i = 0; i < nu; i++) {
+        float u0 = i / (float)nu, u1 = (i + 1) / (float)nu, v0 = j / (float)nv, v1 = (j + 1) / (float)nv;
+        auto P = [&](float u, float v) { V3 top = lerp3(a, b, u), bot = lerp3(d, c, u); return lerp3(top, bot, v); };
+        R3.quadW(P(u0, v0), P(u1, v0), P(u1, v1), P(u0, v1), col, 2, 0, bias);
+    }
+}
 static void shadedBox(const V3& c, const V3& h, float yaw, const Col& col, int cull = -1, const Col* top = nullptr, float bias = 0) {
     V3 f = fwdOf(yaw), r = rightOf(yaw), u(0, 1, 0);
     V3 p[8];
@@ -4831,11 +4859,16 @@ static void shadedBox(const V3& c, const V3& h, float yaw, const Col& col, int c
     struct F4 { int a, b, c, d; V3 n; };
     F4 fs[5] = {{1, 5, 7, 3, r}, {0, 2, 6, 4, -r}, {2, 3, 7, 6, u}, {4, 6, 7, 5, f}, {0, 1, 3, 2, -f}};
     float d = dist2d(c, R3.pos);
+    bool big = h.x > 0.7f || h.y > 0.7f || h.z > 0.7f;
     for (int k = 0; k < 5; k++) {
+        // грань, отвёрнутая от камеры, не видна (коробка замкнута)
+        V3 fc = (p[fs[k].a] + p[fs[k].c]) * 0.5f;
+        if (big && dot(R3.pos - fc, fs[k].n) < 0) continue;
         Col base = (k == 2 && top) ? *top : col;
         Col s = shadeN(base, fs[k].n, c);
         SDL_Color sc = fogged(s, d);
-        R3.quadW(p[fs[k].a], p[fs[k].b], p[fs[k].c], p[fs[k].d], sc, 2, 0, bias);
+        if (big) quadSub(p[fs[k].a], p[fs[k].b], p[fs[k].c], p[fs[k].d], sc, bias, 0.8f);
+        else R3.quadW(p[fs[k].a], p[fs[k].b], p[fs[k].c], p[fs[k].d], sc, 2, 0, bias);
         (void)cull;
     }
 }
@@ -4968,17 +5001,26 @@ static void drawSign(const SObj& o, float dist) {
     V3 f = fwdOf(o.yaw), r = rightOf(o.yaw);
     shadedBox(o.p + V3(0, 1.2f, 0), V3(0.04f, 1.2f, 0.04f), o.yaw, Col(0.5f, 0.5f, 0.52f));
     V3 c = o.p + V3(0, 2.55f, 0) + f * 0.06f;
-    // красный круг с белым центром
-    int N = 14; float R1 = 0.38f, R2 = 0.29f;
+    int N = 16; float R1 = 0.38f, R2 = 0.29f;
+    bool front = dot(R3.pos - c, f) > 0;
+    if (!front) {
+        // обратная сторона — серый металлический круг
+        Col back = shadeN(Col(0.55f, 0.56f, 0.58f), -f, c);
+        for (int i = 0; i < N; i++) {
+            float a0 = i * 2 * PI / N, a1 = (i + 1) * 2 * PI / N;
+            R3.triW(c, c + r * (cosf(a0) * R1) + V3(0, sinf(a0) * R1, 0), c + r * (cosf(a1) * R1) + V3(0, sinf(a1) * R1, 0), fogged(back, dist), 2, 0, 0);
+        }
+        return;
+    }
     Col red = shadeN(Col(0.85f, 0.1f, 0.1f), f, c), wh = shadeN(Col(0.95f, 0.95f, 0.95f), f, c);
     for (int i = 0; i < N; i++) {
         float a0 = i * 2 * PI / N, a1 = (i + 1) * 2 * PI / N;
-        V3 p0 = c + r * (cosf(a0) * R1) + V3(0, sinf(a0) * R1, 0), p1 = c + r * (cosf(a1) * R1) + V3(0, sinf(a1) * R1, 0);
-        V3 q0 = c + r * (cosf(a0) * R2) + V3(0, sinf(a0) * R2, 0) + f * 0.01f, q1 = c + r * (cosf(a1) * R2) + V3(0, sinf(a1) * R2, 0) + f * 0.01f;
-        R3.triW(c, p0, p1, fogged(red, dist), 2, 0, 0);
-        R3.triW(c + f * 0.01f, q0, q1, fogged(wh, dist), 2, 0, -0.02f);
+        V3 o0 = c + r * (cosf(a0) * R1) + V3(0, sinf(a0) * R1, 0), o1 = c + r * (cosf(a1) * R1) + V3(0, sinf(a1) * R1, 0);
+        V3 i0 = c + r * (cosf(a0) * R2) + V3(0, sinf(a0) * R2, 0), i1 = c + r * (cosf(a1) * R2) + V3(0, sinf(a1) * R2, 0);
+        R3.quadW(i0, o0, o1, i1, fogged(red, dist), 2, 0, -0.02f);      // красное кольцо (не перекрывает белый круг)
+        R3.triW(c, i0, i1, fogged(wh, dist), 2, 0, -0.02f);              // белый круг
     }
-    if (dist < 90 && dot(R3.pos - c, f) > 0) { std::string s = fmt("%d", o.ival); drawText3D(c + f * 0.03f, -r, V3(0, 1, 0), s.c_str(), 0.045f, fogged(Col(0.05f, 0.05f, 0.05f), dist), -0.06f); }
+    if (dist < 90) { std::string s = fmt("%d", o.ival); drawText3D(c + f * 0.01f, -r, V3(0, 1, 0), s.c_str(), 0.045f, fogged(Col(0.05f, 0.05f, 0.05f), dist), -0.3f); }
 }
 
 static void drawLamp(const SObj& o, float dist) {
@@ -5001,12 +5043,30 @@ static void drawBillboard(const SObj& o, float dist) {
     shadedBox(o.p + V3(-2.5f, 0, 0) * 0 + r * -2.5f + V3(0, 2.5f, 0), V3(0.12f, 2.5f, 0.12f), o.yaw, pole);
     shadedBox(o.p + r * 2.5f + V3(0, 2.5f, 0), V3(0.12f, 2.5f, 0.12f), o.yaw, pole);
     V3 c = o.p + V3(0, 6.2f, 0);
-    shadedBox(c, V3(5.2f, 1.6f, 0.12f), o.yaw, Col(0.85f, 0.85f, 0.85f));
+    {
+        // корпус щита без лицевой грани (её закрывает полотно); задняя сторона — полосами
+        Col fr(0.85f, 0.85f, 0.85f);
+        for (int k = 0; k < 10; k++) {
+            float x0 = -5.2f + k * 1.04f, x1 = x0 + 1.04f;
+            V3 a = c - f * 0.12f + r * x0, b = c - f * 0.12f + r * x1;
+            R3.quadW(a + V3(0, 1.6f, 0), b + V3(0, 1.6f, 0), b - V3(0, 1.6f, 0), a - V3(0, 1.6f, 0), fogged(shadeN(fr, -f, c), dist), 2, 0, 0);
+            R3.quadW(a + V3(0, 1.6f, 0), b + V3(0, 1.6f, 0), b + V3(0, 1.6f, 0) + f * 0.24f, a + V3(0, 1.6f, 0) + f * 0.24f, fogged(shadeN(fr, V3(0, 1, 0), c), dist), 2, 0, 0);
+            R3.quadW(a - V3(0, 1.6f, 0), b - V3(0, 1.6f, 0), b - V3(0, 1.6f, 0) + f * 0.24f, a - V3(0, 1.6f, 0) + f * 0.24f, fogged(shadeN(fr, V3(0, -1, 0), c), dist), 2, 0, 0);
+        }
+        for (int s = -1; s <= 1; s += 2) {
+            V3 e = c + r * (5.2f * s);
+            R3.quadW(e - f * 0.12f + V3(0, 1.6f, 0), e + f * 0.12f + V3(0, 1.6f, 0), e + f * 0.12f - V3(0, 1.6f, 0), e - f * 0.12f - V3(0, 1.6f, 0), fogged(shadeN(fr, r * (float)s, c), dist), 2, 0, 0);
+        }
+    }
     Col bg = shadeN(o.col, f, c, L.night * 0.5f);
-    R3.quadW(c + f * 0.13f - r * 5 + V3(0, 1.45f, 0), c + f * 0.13f + r * 5 + V3(0, 1.45f, 0), c + f * 0.13f + r * 5 - V3(0, 1.45f, 0), c + f * 0.13f - r * 5 - V3(0, 1.45f, 0), fogged(bg, dist), 2, 0, -0.02f);
+    // полотно щита — полосами, чтобы надпись правильно сортировалась вблизи
+    for (int k = 0; k < 10; k++) {
+        float x0 = -5 + k, x1 = x0 + 1;
+        R3.quadW(c + f * 0.13f + r * x0 + V3(0, 1.45f, 0), c + f * 0.13f + r * x1 + V3(0, 1.45f, 0), c + f * 0.13f + r * x1 - V3(0, 1.45f, 0), c + f * 0.13f + r * x0 - V3(0, 1.45f, 0), fogged(bg, dist), 2, 0, -0.02f);
+    }
     if (dist < 220 && dot(R3.pos - c, f) > 0) {
         float px = std::min(0.17f, 9.6f / (utf8Len(o.text.c_str()) * 6.0f));
-        drawText3D(c + f * 0.15f, -r, V3(0, 1, 0), o.text.c_str(), px, fogged(Col(1, 1, 1) * (0.8f + 0.2f * L.night), dist), -0.08f);
+        drawText3D(c + f * 0.15f, -r, V3(0, 1, 0), o.text.c_str(), px, fogged(Col(1, 1, 1) * (0.8f + 0.2f * L.night), dist), -0.6f);
     }
 }
 
@@ -5018,14 +5078,17 @@ static void drawPostBooth(const SObj& o, float dist) {
         V3 n = k == 0 ? f : (k == 1 ? -f : (k == 2 ? r : -r));
         V3 t = k < 2 ? r : f; float hw = k < 2 ? 2.2f : 2.0f; float off = k < 2 ? 2.01f : 2.21f;
         V3 c = o.p + n * off + V3(0, 1.6f, 0);
-        R3.quadW(c - t * hw + V3(0, 0.22f, 0), c + t * hw + V3(0, 0.22f, 0), c + t * hw - V3(0, 0.22f, 0), c - t * hw - V3(0, 0.22f, 0), fogged(shadeN(stripe, n, c), dist), 2, 0, -0.08f);
+        if (dot(R3.pos - c, n) < 0) continue;
+        quadSub(c - t * hw + V3(0, 0.22f, 0), c + t * hw + V3(0, 0.22f, 0), c + t * hw - V3(0, 0.22f, 0), c - t * hw - V3(0, 0.22f, 0), fogged(shadeN(stripe, n, c), dist), -1.2f, 0.6f);
     }
     shadedBox(o.p + V3(0, 3.15f, 0), V3(2.5f, 0.15f, 2.3f), o.yaw, Col(0.3f, 0.3f, 0.35f));
     // окна
     Col gl = shadeN(Col(0.2f, 0.3f, 0.4f), f, o.p, L.night * 0.6f);
     if (L.night > 0.4f) gl = Col(1, 0.9f, 0.6f) * 0.8f;
-    R3.quadW(o.p + f * 2.03f - r * 1.6f + V3(0, 2.6f, 0), o.p + f * 2.03f + r * 1.6f + V3(0, 2.6f, 0), o.p + f * 2.03f + r * 1.6f + V3(0, 2.0f, 0), o.p + f * 2.03f - r * 1.6f + V3(0, 2.0f, 0), fogged(gl, dist), 2, 0, -0.05f);
-    if (dist < 160 && dot(R3.pos - o.p, f) > 0) drawText3D(o.p + f * 2.05f + V3(0, 0.75f, 0), -r, V3(0, 1, 0), "ДПС", 0.09f, fogged(Col(0.1f, 0.2f, 0.6f), dist), -0.1f);
+    if (dot(R3.pos - (o.p + f * 2.0f), f) > 0) {
+        quadSub(o.p + f * 2.03f - r * 1.6f + V3(0, 2.6f, 0), o.p + f * 2.03f + r * 1.6f + V3(0, 2.6f, 0), o.p + f * 2.03f + r * 1.6f + V3(0, 2.0f, 0), o.p + f * 2.03f - r * 1.6f + V3(0, 2.0f, 0), fogged(gl, dist), -1.2f, 0.6f);
+        if (dist < 160) drawText3D(o.p + f * 2.05f + V3(0, 0.75f, 0), -r, V3(0, 1, 0), "ДПС", 0.09f, fogged(Col(0.1f, 0.2f, 0.6f), dist), -1.6f);
+    }
     // антенна и флажок
     shadedBox(o.p + V3(1.8f, 4.2f, 1.6f), V3(0.03f, 1.0f, 0.03f), o.yaw, Col(0.3f, 0.3f, 0.3f));
 }
@@ -5035,8 +5098,10 @@ static void drawKiosk(const SObj& o, float dist) {
     shadedBox(o.p + V3(0, 1.3f, 0), V3(1.8f, 1.3f, 1.4f), o.yaw, Col(0.9f, 0.9f, 0.88f));
     shadedBox(o.p + V3(0, 2.75f, 0), V3(1.95f, 0.15f, 1.55f), o.yaw, o.col);
     Col gl = L.night > 0.4f ? Col(1, 0.92f, 0.7f) : shadeN(Col(0.3f, 0.4f, 0.5f), f, o.p);
-    R3.quadW(o.p + f * 1.42f - r * 1.5f + V3(0, 2.2f, 0), o.p + f * 1.42f + r * 1.5f + V3(0, 2.2f, 0), o.p + f * 1.42f + r * 1.5f + V3(0, 1.0f, 0), o.p + f * 1.42f - r * 1.5f + V3(0, 1.0f, 0), fogged(gl, dist), 2, 0, -0.05f);
-    if (dist < 100 && dot(R3.pos - o.p, f) > 0) drawText3D(o.p + f * 1.56f + V3(0, 2.75f, 0), -r, V3(0, 1, 0), (o.seed & 1) ? "ПРОДУКТЫ" : "ШАУРМА", 0.05f, fogged(Col(1, 1, 1), dist), -0.1f);
+    if (dot(R3.pos - (o.p + f * 1.4f), f) > 0) {
+        quadSub(o.p + f * 1.42f - r * 1.5f + V3(0, 2.2f, 0), o.p + f * 1.42f + r * 1.5f + V3(0, 2.2f, 0), o.p + f * 1.42f + r * 1.5f + V3(0, 1.0f, 0), o.p + f * 1.42f - r * 1.5f + V3(0, 1.0f, 0), fogged(gl, dist), -1.2f, 0.6f);
+        if (dist < 100) drawText3D(o.p + f * 1.56f + V3(0, 2.75f, 0), -r, V3(0, 1, 0), (o.seed & 1) ? "ПРОДУКТЫ" : "ШАУРМА", 0.05f, fogged(Col(1, 1, 1), dist), -1.6f);
+    }
 }
 
 static void drawBench(const SObj& o, float dist) {
@@ -5049,6 +5114,32 @@ static void drawBench(const SObj& o, float dist) {
 
 static void drawGuardRails() {
     V3 cam = R3.pos;
+    // сигнальные столбики каждые 25 м вдоль трассы (со световозвращателями)
+    for (size_t ei = 0; ei < EDGES.size(); ei++) {
+        const Edge& e = EDGES[ei];
+        if (!e.highway) continue;
+        float near0 = dot(cam - e.pa, e.dir);
+        if (dist2d(cam, e.pa + e.dir * clampf(near0, 0, e.slen)) > 170) continue;
+        V3 rr = rightOf(e.yaw);
+        float s0 = clampf(near0 - 170, 0, e.slen), s1 = clampf(near0 + 170, 0, e.slen);
+        for (float s = floorf(s0 / 25) * 25; s < s1; s += 25) {
+            for (int side = -1; side <= 1; side += 2) {
+                V3 p = e.pa + e.dir * s + rr * (side * (e.halfW + 2.7f));
+                float d = dist2d(p, cam); if (d > 170) continue;
+                if (!R3.sphereVisible(p + V3(0, 0.6f, 0), 1)) continue;
+                V3 n = rr * (float)-side;
+                Col w = shadeN(Col(0.95f, 0.95f, 0.95f), n, p);
+                R3.quadW(p + V3(0, 1.1f, 0) - e.dir * 0.06f, p + V3(0, 1.1f, 0) + e.dir * 0.06f, p + e.dir * 0.06f, p - e.dir * 0.06f, fogged(w, d), 2, 0, 0);
+                Col b = Col(0.08f, 0.08f, 0.08f);
+                R3.quadW(p + V3(0, 1.0f, 0) - e.dir * 0.065f + n * 0.01f, p + V3(0, 1.0f, 0) + e.dir * 0.065f + n * 0.01f, p + V3(0, 0.85f, 0) + e.dir * 0.065f + n * 0.01f, p + V3(0, 0.85f, 0) - e.dir * 0.065f + n * 0.01f, fogged(b, d), 2, 0, -0.02f);
+                // световозвращатель: ночью вспыхивает в свете фар
+                Col rc = side > 0 ? Col(1, 1, 1) : Col(1, 0.45f, 0.1f);
+                float glow = L.night > 0.3f && d < 90 ? L.night * (1 - d / 90) : 0;
+                R3.quadW(p + V3(0, 0.98f, 0) - e.dir * 0.04f + n * 0.02f, p + V3(0, 0.98f, 0) + e.dir * 0.04f + n * 0.02f, p + V3(0, 0.88f, 0) + e.dir * 0.04f + n * 0.02f, p + V3(0, 0.88f, 0) - e.dir * 0.04f + n * 0.02f, fogged(lerpc(rc * 0.5f, rc, glow), d * (1 - glow)), 2, 0, -0.04f);
+                if (glow > 0.05f) R3.billboard(p + V3(0, 0.93f, 0) + n * 0.05f, 0.25f, 0.25f, toSDL(rc * (glow * 0.8f)), 0, 3, -0.2f);
+            }
+        }
+    }
     Col rail(0.72f, 0.74f, 0.76f), post(0.45f, 0.45f, 0.47f);
     for (size_t ei = 0; ei < EDGES.size(); ei++) {
         const Edge& e = EDGES[ei];
@@ -5321,7 +5412,9 @@ struct AICar {
     float exhaustT = 0; uint32_t id = 0;
     bool vanish = false;
     float stuckD = 0, ghostT = 0;
+    bool crashed = false; float yawOff = 0;   // участник ДТП
 };
+static bool gAccActive = false; static V3 gAccPos;   // место ДТП (для трафика)
 static std::vector<AICar> CARS;
 static uint32_t gCarIdCounter = 1;
 
@@ -5627,6 +5720,28 @@ static void beginTurn(AICar& c) {
     c.blink = (c.mode == CMODE_DRIVE && fabsf(cr) > 0.3f) ? (cr < 0 ? 1 : -1) : (c.mode == CMODE_STOPPED ? 2 : 0);
 }
 
+// перекрёсток занят машиной с пересекающейся траекторией?
+static bool nodeConflict(const AICar& c, int idx, int node) {
+    const Edge& e = EDGES[c.edge];
+    int myTs = c.planEdge >= 0 ? turnSign(e, c.dir, c.planEdge, c.planDir) : 0;
+    V3 myF = c.dir == 0 ? e.dir : -e.dir;
+    for (size_t i = 0; i < CARS.size(); i++) {
+        if ((int)i == idx) continue;
+        const AICar& o = CARS[i];
+        if (!o.alive || !o.turning || o.crashed || o.mode == CMODE_HELPER) continue;
+        const Edge& oe = EDGES[o.edge];
+        if (edgeEndNode(oe, o.dir) != node || o.tt > 0.88f) continue;
+        if (o.speed < 0.5f && o.stuckD > 6) continue;   // сама стоит в заторе — не держим перекрёсток
+        V3 of = o.dir == 0 ? oe.dir : -oe.dir;
+        float d = dot(myF, of);
+        if (d > 0.7f) continue;                                   // та же полоса подхода — обычная очередь
+        int ots = turnSign(oe, o.dir, o.nEdge, o.nDir);
+        if (d < -0.7f && myTs == 0 && ots == 0) continue;         // встречные прямо — не мешают
+        if (d < -0.7f && myTs == 1 && ots == 1) continue;         // встречные направо — не мешают
+        return true;
+    }
+    return false;
+}
 static void carComputePose(AICar& c) {
     if (c.turning) {
         float t = clampf(c.tt, 0, 1);
@@ -5641,7 +5756,7 @@ static void carComputePose(AICar& c) {
         c.pos = st + f * c.s + r * (laneOffset(e, c.lane) + c.lat);
         // плавный разворот при смене бокового смещения
         float dl = c.latTarget - c.lat;
-        c.yaw = wrapAngle(y + clampf(dl * 0.12f, -0.25f, 0.25f) * (c.speed > 1 ? 1 : c.speed));
+        c.yaw = wrapAngle(y + clampf(dl * 0.12f, -0.25f, 0.25f) * (c.speed > 1 ? 1 : c.speed) + c.yawOff);
     }
 }
 
@@ -5708,6 +5823,7 @@ static int spawnTrafficCar(const V3& center, float minD, float maxD, bool avoidV
             V3 v = R3.toView(p); if (v.z > 0 && fabsf(v.x) < v.z * 1.2f) continue;
         }
         if (!laneFree(ei, dir, lane, sl, 18)) continue;
+        if (sl > e.slen - 25 || sl < 8) continue;   // не появляться вплотную к перекрёстку
         bool clear = true; for (const AICar& o : CARS) if (o.alive && (dist2d(o.pos, p) < 14 || (o.trailer && dist2d(o.tpos, p) < 14))) { clear = false; break; }
         if (!clear) continue;
         if (dist2d(p, PL.pos) < 25) continue;
@@ -5737,8 +5853,10 @@ static void findLeader(const AICar& c, int selfIdx, float& gap, float& vLead) {
     V3 f = fwdOf(c.yaw), r = rightOf(c.yaw);
     float look = std::max(55.0f, c.speed * 3.2f + 15);
     for (size_t i = 0; i < CARS.size(); i++) {
-        if ((int)i == selfIdx || c.ghostT > 0) continue;
+        if ((int)i == selfIdx) continue;
         const AICar& o = CARS[i]; if (!o.alive || o.mode == CMODE_GONE) continue;
+        // «страховка от тупика» игнорирует только чужие траектории, но не машины на своей полосе
+        if (c.ghostT > 0 && !(!o.turning && !c.turning && o.edge == c.edge && o.dir == c.dir && o.lane == c.lane)) continue;
         // слияние в одну полосу после поворота: приоритет у того, кто ближе к выходу
         bool mergeLeader = false;
         if (c.turning && o.turning && o.nEdge == c.nEdge && o.nDir == c.nDir && o.nLane == c.nLane && o.edge != c.edge) {
@@ -5760,7 +5878,7 @@ static void findLeader(const AICar& c, int selfIdx, float& gap, float& vLead) {
             if (along < -ohl || along > look + ohl) continue;
             float lat = dot(d, r);
             float thr = c.halfW + o.halfW * 0.9f + 0.15f;
-            bool sameLane = k == 0 && !c.turning && !o.turning && o.edge == c.edge && o.dir == c.dir && o.lane == c.lane;
+            bool sameLane = k == 0 && !o.crashed && !c.turning && !o.turning && o.edge == c.edge && o.dir == c.dir && o.lane == c.lane;
             if (fabsf(lat) > thr && !sameLane) continue;
             // встречные на повороте не считаем
             if (dot(fwdOf(k == 0 ? o.yaw : o.tyaw), f) < -0.3f && fabsf(lat) > 1.0f) continue;
@@ -5799,7 +5917,8 @@ static void tryLaneChange(AICar& c, int newLane) {
     const Edge& e = EDGES[c.edge];
     if (newLane < 0 || newLane >= e.lanes || newLane == c.lane || c.turning) return;
     if (c.s > e.slen - 25) return;
-    if (c.speed < 3 && c.mode != CMODE_PULLOVER) return;
+    bool nearAcc = gAccActive && dist2d(c.pos, gAccPos) < 80;
+    if (c.speed < 3 && c.mode != CMODE_PULLOVER && !nearAcc) return;
     // проверка: свободна ли целевая полоса
     for (const AICar& o : CARS) {
         if (!o.alive || &o == &c || o.turning || o.edge != c.edge || o.dir != c.dir || o.lane != newLane) continue;
@@ -5888,12 +6007,14 @@ static void updateAICar(AICar& c, int idx, float dt) {
             v0 *= 0.45f; c.blink = 1;
             if (c.yieldT <= 0) { c.latTarget = 0; c.blink = 0; }
         } else c.latTarget = 0;
+        // место ДТП: «зеваки» притормаживают
+        if (gAccActive && !c.crashed && dist2d(c.pos, gAccPos) < 70) v0 = std::min(v0, (e.highway ? 40.f : 25.f) / 3.6f);
         // камеры: притормаживают
         for (const Camera_& cam : SPEEDCAMS) {
             if (cam.edge != c.edge || cam.dir != c.dir || c.turning) continue;
             float ds = cam.s - c.s;
             if (ds > -5 && ds < 160 && !(c.speeder && (c.id % 3 == 0))) v0 = std::min(v0, lim * 0.96f);
-            if (ds < 0 && ds > -c.speed * dt - 0.01f && c.speed > lim + 20 / 3.6f) c.flashT = 0.25f;
+            if (ds < 0 && ds > -c.speed * dt - 0.01f && c.speed > lim + 10 / 3.6f) c.flashT = 0.25f;
         }
     }
     // светофор
@@ -5910,6 +6031,16 @@ static void updateAICar(AICar& c, int idx, float dt) {
             if (mustStop) { float g = stopAt - c.halfL * 0.0f - 0.5f; redStop = true; if (g < gap) { gap = g; vl = 0; } }
         }
     }
+    // занятый перекрёсток: ждём у стоп-линии, пока проедут машины с пересекающихся направлений
+    if (!c.turning && c.mode != CMODE_HELPER) {
+        int node = edgeEndNode(e, c.dir);
+        float distEnd = e.slen - c.s;
+        if (NODES[node].edges.size() >= 3 && distEnd < std::max(10.f, c.speed * c.speed / 12 + 7) && distEnd > 0.5f && nodeConflict(c, idx, node)) {
+            float g = std::max(0.f, distEnd - (NODES[node].light ? 4.8f : 1.5f) - 0.5f);
+            if (g < gap) { gap = g; vl = 0; }
+            redStop = true;
+        }
+    }
     // пешеходы на переходе
     if (!ignoreLights && !PEDS.empty() && pedCrossingNear(c.pos, fwdOf(c.yaw), c.halfL + 10, 3.0f)) { float g = 5.0f; if (g < gap) { gap = g; vl = 0; } }
     carAccel(c, v0, gap, vl, dt, amax, bcomf);
@@ -5923,6 +6054,8 @@ static void updateAICar(AICar& c, int idx, float dt) {
         else if (c.lane == 0 && gap > 60 && c.mode == CMODE_DRIVE && grng.chance(dt * 0.25f)) tryLaneChange(c, 1);
         else if (c.mode == CMODE_FLEE && gap < 25 && c.lane == 0 && grng.chance(dt * 3)) tryLaneChange(c, 1);
     }
+    // объезд разбитых машин: сменить полосу, если впереди затор у места ДТП
+    if (gAccActive && !c.crashed && !c.turning && e.lanes > 1 && c.mode == CMODE_DRIVE && gap < 22 && vl < 1 && dist2d(c.pos, gAccPos) < 80 && grng.chance(dt * 2)) tryLaneChange(c, c.lane == 0 ? 1 : 0);
     // беглец толкается
     if (c.mode == CMODE_FLEE && gap < 4 && c.speed < 6) { c.stuck += dt; if (c.stuck > 2.5f) { c.lat += 0; c.pressure += dt * 0.6f; } } else c.stuck = 0;
     // боковое смещение
@@ -6017,7 +6150,7 @@ static void updateTraffic(float dt, bool spawn) {
         if (c.mode == CMODE_GONE) { c.alive = false; continue; }
         float d = dist2d(c.pos, center);
         if (c.vanish && (d > 90 || (c.modeT > 25 && R3.toView(c.pos).z < 0))) { c.alive = false; continue; }
-        bool special = c.vanish || c.caseIdx >= 0 || (int)i == gChaseCar || c.mode == CMODE_HELPER || c.mode == CMODE_BLOCK || c.wanted;
+        bool special = c.crashed || c.vanish || c.caseIdx >= 0 || (int)i == gChaseCar || c.mode == CMODE_HELPER || c.mode == CMODE_BLOCK || c.wanted;
         if (d > 470 && !special) { c.alive = false; continue; }
         if (d > 900) { c.alive = false; continue; }
         alive++;
@@ -6035,6 +6168,23 @@ static void updateTraffic(float dt, bool spawn) {
                     emitPart(mul(rot, M.exhaust) + c.pos, vel, heavy ? 1.6f : 0.9f, heavy ? 0.2f : 0.1f, heavy ? Col(0.35f, 0.35f, 0.37f) : Col(0.65f, 0.65f, 0.67f), heavy ? 0.35f : 0.18f, 0.6f);
                 }
             }
+        }
+    }
+    // страховка: машина, догнавшая другую вплотную, останавливается, а не проезжает сквозь
+    for (size_t i = 0; i < CARS.size(); i++) {
+        AICar& a = CARS[i];
+        if (!a.alive || a.crashed || a.mode == CMODE_HELPER || a.mode == CMODE_STOPPED || a.speed < 0.5f) continue;
+        if (dist2d(a.pos, center) > 300) continue;
+        V3 fa = fwdOf(a.yaw);
+        for (size_t j = 0; j < CARS.size(); j++) {
+            if (i == j) continue;
+            const AICar& b = CARS[j];
+            if (!b.alive || b.mode == CMODE_HELPER) continue;
+            V3 d = b.pos - a.pos; float dd = len(d);
+            if (dd > a.halfL + b.halfL + 1.0f) continue;
+            float along = dot(d, fa), lat = fabsf(dot(d, rightOf(a.yaw)));
+            if (dot(fwdOf(b.yaw), fa) < 0.5f) continue;   // только попутные (пересекающиеся решает правило перекрёстка)
+            if (along > 0 && lat < a.halfW + b.halfW && along < a.halfL + b.halfL + 0.4f) { a.speed = std::min(a.speed, b.speed * std::max(0.f, dot(fwdOf(b.yaw), fa))); a.brake = true; }
         }
     }
     if (spawn) {
@@ -6124,7 +6274,7 @@ static void drawSpeedCams(float time) {
 // =====================================================================
 //  Игровая логика и интерфейс
 // =====================================================================
-enum Screen { SC_MENU, SC_SHIFTSTART, SC_DRIVE, SC_DOCS, SC_TRUNK, SC_DECIDE, SC_RESULT, SC_PAUSE, SC_MAP, SC_GARAGE, SC_SUMMARY, SC_HELP, SC_EXITCONFIRM, SC_SETTINGS };
+enum Screen { SC_MENU, SC_SHIFTSTART, SC_DRIVE, SC_DOCS, SC_TRUNK, SC_DECIDE, SC_RESULT, SC_PAUSE, SC_MAP, SC_GARAGE, SC_SUMMARY, SC_HELP, SC_EXITCONFIRM, SC_SETTINGS, SC_ACCIDENT };
 static int gSettingsReturn = 0;
 static SDL_Joystick* gAccel = nullptr;
 static float accelSteer();
@@ -6226,7 +6376,7 @@ static void computeTruth(Case& c) {
         if (c.deprived) { evac = true; c.facts.push_back("ВОДИТЕЛЬ ЛИШЁН ПРАВ"); }
     }
     float over = c.violSpeed - c.violLimit;
-    if (c.reason == 2 || (c.reason == 1 && over > 20)) { c.needArt[ART_SPEED] = true; c.facts.push_back(fmt("ПРЕВЫШЕНИЕ НА %d КМ/Ч", (int)over)); }
+    if (c.reason == 2 || (c.reason == 1 && over > 10)) { c.needArt[ART_SPEED] = true; c.facts.push_back(fmt("ПРЕВЫШЕНИЕ НА %d КМ/Ч", (int)over)); }
     if (c.reason == 3) { c.needArt[ART_RED] = true; c.facts.push_back("ПРОЕЗД НА КРАСНЫЙ"); }
     if (!c.osPresent) { c.needArt[ART_OSAGO] = true; c.facts.push_back("НЕТ ПОЛИСА ОСАГО"); }
     else if (c.osValid < today) { c.needArt[ART_OSAGO] = true; c.facts.push_back("ОСАГО ПРОСРОЧЕН"); }
@@ -6238,6 +6388,7 @@ static void computeTruth(Case& c) {
     else if (c.reason == 1) { lvl = V_WARN; c.facts.push_back(fmt("НЕЗНАЧИТЕЛЬНОЕ ПРЕВЫШЕНИЕ (+%d)", (int)over)); }
     else lvl = V_RELEASE;
     if (c.facts.empty()) c.facts.push_back("ВСЁ В ПОРЯДКЕ");
+    if (c.oSur != c.sur && !c.plateMismatch) c.facts.push_back("(СОБСТВЕННИК В СТС ДРУГОЙ — ЭТО НЕ НАРУШЕНИЕ)");
     c.needLevel = lvl;
 }
 
@@ -6351,12 +6502,13 @@ static int createCase(int carIdx, int reason) {
 // ---------------------------------------------------------------------
 //  Смена, задания
 // ---------------------------------------------------------------------
-enum TaskType { T_CHECK, T_FINES, T_CATCH, T_SPEEDERS, T_DETAIN, T_CONTRA, T_NOERR, T_COUNT };
+enum TaskType { T_CHECK, T_FINES, T_CATCH, T_SPEEDERS, T_DETAIN, T_CONTRA, T_NOERR, T_ACCIDENT, T_COUNT };
 struct Task { int type; int need; int have; int reward; bool done; };
 struct ShiftState {
     bool active = false; int district = 0; bool night = false; int weather = 0;   // 0 ясно, 1 пасмурно, 2 дождь
     float minutes = 0, startMin = 0, endMin = 0;
     Task tasks[3];
+    int accidents = 0;
     int checks = 0, fines = 0, finesSum = 0, detains = 0, chases = 0, chaseWins = 0, correct = 0, wrong = 0, speeders = 0, contra = 0;
     int camIncome = 0, bonus = 0, penalties = 0, repDelta = 0, startRank = 0, startMoney = 0;
     float lastCamMin = 0, nextWanted = 0; int wantedCar = -1; std::string wantedDesc;
@@ -6375,6 +6527,7 @@ static const char* taskText(const Task& t) {
         case T_DETAIN: s = fmt("ЗАДЕРЖИ НАРУШИТЕЛЯ: %d/%d", std::min(t.have, t.need), t.need); break;
         case T_CONTRA: s = fmt("НАЙДИ КОНТРАБАНДУ: %d/%d", std::min(t.have, t.need), t.need); break;
         case T_NOERR: s = "СМЕНА БЕЗ ОШИБОК"; break;
+        case T_ACCIDENT: s = fmt("ОФОРМИ ДТП: %d/%d", std::min(t.have, t.need), t.need); break;
     }
     return s.c_str();
 }
@@ -6391,6 +6544,7 @@ static void genTasks() {
             case T_DETAIN: k.need = 1; k.reward = 2500; break;
             case T_CONTRA: k.need = 1; k.reward = 3000; break;
             case T_NOERR: k.need = 1; k.reward = 2000; break;
+            case T_ACCIDENT: k.need = 1; k.reward = 2500; break;
         }
     }
 }
@@ -6608,10 +6762,12 @@ static void updateCamera(float dt, bool snap) {
         Mat3 rot = rotYPR(PL.yaw, PL.pitch, PL.roll);
         gCamPos = mul(rot, V3(-0.37f * M.halfW / 0.9f, M.roofY * 0.8f, (M.maxZ + M.minZ) * 0.5f - 0.05f)) + PL.pos;
         gCamYaw = PL.yaw; gCamPitch = -0.05f - PL.pitch;
-        R3.setCamera(gCamPos, gCamYaw, gCamPitch, 72);
+        float spk = clampf((fabsf(PL.speed) - 15) / 35, 0, 1);
+        R3.setCamera(gCamPos + V3(0, sinf(gTime * 27.0f) * spk * spk * 0.02f, 0), gCamYaw, gCamPitch, 70 + clampf((fabsf(PL.speed) - 8) * 0.35f, 0, 16));
         return;
     }
-    float back = 4.8f + M.halfL * 1.0f + fabsf(PL.speed) * 0.04f, up = 1.6f + M.height * 0.9f;
+    float spdK = clampf((fabsf(PL.speed) - 15) / 35, 0, 1);   // 0 медленно .. 1 очень быстро
+    float back = 4.8f + M.halfL * 1.0f - spdK * 0.8f, up = 1.6f + M.height * 0.9f - spdK * 0.35f;
     float yawT = PL.yaw; if (PL.speed < -1) yawT = PL.yaw;
     if (snap) gCamYaw = yawT;
     gCamYaw = wrapAngle(gCamYaw + wrapAngle(yawT - gCamYaw) * clampf(dt * 5.5f, 0, 1));
@@ -6624,9 +6780,209 @@ static void updateCamera(float dt, bool snap) {
     V3 d = look - gCamPos;
     float pitch = atan2f(d.y, sqrtf(d.x * d.x + d.z * d.z));
     gCamPitch = pitch;
-    R3.setCamera(gCamPos, gCamYaw, gCamPitch, 64 + std::min(fabsf(PL.speed) * 0.25f, 10.f));
+    // тряска на большой скорости и расширение обзора
+    float shake = spdK * spdK * 0.05f + (PL.offroad ? clampf(fabsf(PL.speed) / 20, 0, 1) * 0.06f : 0);
+    V3 sp = gCamPos + V3(sinf(gTime * 31.0f) * shake, sinf(gTime * 23.0f + 1.3f) * shake * 0.8f, 0);
+    R3.setCamera(sp, gCamYaw, gCamPitch, 62 + clampf((fabsf(PL.speed) - 8) * 0.45f, 0, 22));
 }
 
+// ---------------------------------------------------------------------
+//  ДТП: вызовы, место происшествия
+// ---------------------------------------------------------------------
+enum AccType { ACC_REAREND, ACC_RED, ACC_LANE, ACC_YIELD, ACC_NTYPES };
+enum AccArt { AA_DIST, AA_RED, AA_LANE, AA_YIELD, AA_N };
+static const char* ACC_ART_NAMES[AA_N] = {"12.15 НЕ СОБЛЮДЁН ДИСТАНЦИЯ", "12.12 ПРОЕЗД НА КРАСНЫЙ", "12.14 ПЕРЕСТРОЕНИЕ С ПОМЕХОЙ", "12.13 НЕ УСТУПИЛ (ПОМЕХА СПРАВА)"};
+struct Accident {
+    bool active = false; int stage = 0;          // 0 едем на вызов, 1 на месте
+    int type = 0, guilty = 0;                      // guilty: 0 — водитель А, 1 — Б
+    int car[2] = {-1, -1}; uint32_t carId[2] = {0, 0};
+    int caseIdx[2] = {-1, -1};
+    V3 pos; float yaw = 0; std::string where;
+    float callMin = 0, deadline = 0;
+    bool injured = false, ambulance = false, drunk[2] = {false, false}, tested[2] = {false, false}, witness = false;
+    int pickGuilty = -1, pickArt = -1;
+    std::string stmt[2], damage[2], witnessText;
+    float smokeT = 0;
+};
+static Accident ACC;
+static float gNextAccMin = 0;
+
+static std::string carDesc(int ci) {
+    const AICar& c = CARS[ci];
+    return CM[c.model].name + ", " + (c.taxi ? std::string("ЖЁЛТЫЙ") : std::string(colorName(c.paint)));
+}
+static int spawnCrashCar(int edge, int dir, int lane, float s, float lat, float yawOff) {
+    const Edge& e = EDGES[edge];
+    AICar c; c.alive = true; c.id = gCarIdCounter++;
+    for (int t = 0; t < 8; t++) { c.model = pickTrafficModel(e.highway, c.trailer, c.taxi, c.paint, c.paint2); if (!c.trailer && c.model != MD_GAZEL) break; }
+    c.trailer = false;
+    const CarModel& M = CM[c.model]; c.halfW = M.halfW; c.halfL = M.halfL;
+    c.plate = allocPlate(c.plateStr, c.region);
+    c.edge = edge; c.dir = dir; c.lane = lane; c.s = s; c.turning = false; c.planEdge = -1; planNext(c);
+    c.lat = c.latTarget = lat; c.yawOff = yawOff;
+    c.mode = CMODE_STOPPED; c.crashed = true; c.checked = true; c.speed = 0; c.blink = 2;
+    carComputePose(c); c.lastYaw = c.yaw;
+    for (size_t i = 0; i < CARS.size(); i++) if (!CARS[i].alive) { CARS[i] = c; return (int)i; }
+    CARS.push_back(c); return (int)CARS.size() - 1;
+}
+
+static void clearAccident(bool towAway) {
+    for (int k = 0; k < 2; k++) {
+        int ci = ACC.car[k];
+        if (ci >= 0 && ci < (int)CARS.size() && CARS[ci].alive && CARS[ci].id == ACC.carId[k]) {
+            if (towAway) { CARS[ci].vanish = true; CARS[ci].modeT = 0; } else CARS[ci].alive = false;
+            CARS[ci].crashed = towAway;   // остаются стоять, пока игрок не уедет
+        }
+    }
+    ACC.active = false; gAccActive = false;
+}
+
+static void createAccident() {
+    // место: участок в 250–900 м от игрока
+    int best = -1; float bs = 0; int bdir = 0;
+    for (int tries = 0; tries < 60 && best < 0; tries++) {
+        int ei = grng.i((int)EDGES.size());
+        const Edge& e = EDGES[ei];
+        float margin = e.highway ? 45.f : 22.f;
+        if (e.slen < margin * 2 + 10) continue;
+        float s = grng.range(margin, e.slen - margin);
+        int dir = grng.i(2);
+        V3 p = lanePos(e, dir, e.lanes - 1, s, 0);
+        float d = dist2d(p, PL.pos);
+        if (d < 120 || d > 800) continue;
+        if (tries < 40 && e.district != districtAt(PL.pos)) continue;   // сначала — на своём участке
+        bool nearPost = false; for (int k = 0; k < 4; k++) if (dist2d(p, POSTS[k].pos) < 60) nearPost = true;
+        if (nearPost) continue;
+        best = ei; bs = s; bdir = dir;
+    }
+    if (best < 0) return;
+    const Edge& e = EDGES[best];
+    ACC = Accident();
+    // тип
+    if (e.highway) ACC.type = grng.chance(0.5f) ? ACC_REAREND : ACC_LANE;
+    else { int r = grng.i(3); ACC.type = r == 0 ? ACC_REAREND : (r == 1 ? ACC_RED : ACC_YIELD); }
+    ACC.guilty = grng.i(2);
+    int lane = e.lanes - 1;
+    float off = laneOffset(e, lane);
+    float latSide = e.highway ? e.halfW + 1.6f - off : e.halfW - off + 0.55f;   // обочина / край тротуара
+    int g = ACC.guilty, v = 1 - g;
+    int cg = -1, cv = -1;
+    if (ACC.type == ACC_REAREND) {
+        cv = spawnCrashCar(best, bdir, lane, bs, latSide, -0.06f);
+        float back = CARS[cv].halfL + 2.6f;
+        cg = spawnCrashCar(best, bdir, lane, bs - back - 0.3f, latSide - 0.15f, 0.08f);
+    } else if (ACC.type == ACC_LANE) {
+        cv = spawnCrashCar(best, bdir, lane, bs, latSide, 0.1f);
+        cg = spawnCrashCar(best, bdir, lane, bs - 2.2f, latSide - 1.7f, 0.32f);
+    } else {
+        cg = spawnCrashCar(best, bdir, lane, bs, latSide - 0.2f, 0.25f);
+        cv = spawnCrashCar(best, bdir, lane, bs + 3.4f, latSide + 0.1f, ACC.type == ACC_YIELD ? -1.25f : 1.2f);
+    }
+    ACC.car[g] = cg; ACC.car[v] = cv; ACC.carId[g] = CARS[cg].id; ACC.carId[v] = CARS[cv].id;
+    for (int k = 0; k < 2; k++) ACC.caseIdx[k] = createCase(ACC.car[k], 0);
+    // такие дела не «висят» на машинах (чтобы не было обычной проверки документов)
+    for (int k = 0; k < 2; k++) CARS[ACC.car[k]].caseIdx = -1;
+    ACC.pos = (CARS[cg].pos + CARS[cv].pos) * 0.5f; ACC.yaw = CARS[cg].yaw;
+    ACC.where = std::string(DISTRICT_NAMES[e.district]) + (e.highway ? fmt(", %d КМ", (int)(bs / 1000) + 1) : std::string(", ПЕРЕКРЁСТОК"));
+    ACC.active = true; ACC.stage = 0;
+    ACC.callMin = SHF.minutes; ACC.deadline = SHF.minutes + 75;
+    ACC.injured = grng.chance(0.4f);
+    for (int k = 0; k < 2; k++) ACC.drunk[k] = grng.chance(k == g ? 0.22f : 0.05f);
+    // повреждения и показания
+    std::string gd = carDesc(cg), vd = carDesc(cv);
+    switch (ACC.type) {
+        case ACC_REAREND:
+            ACC.damage[g] = "ПЕРЕДНИЙ БАМПЕР, ФАРЫ, КАПОТ"; ACC.damage[v] = "ЗАДНИЙ БАМПЕР, КРЫШКА БАГАЖНИКА";
+            ACC.stmt[g] = "ОН РЕЗКО ЗАТОРМОЗИЛ БЕЗ ПРИЧИНЫ! Я НЕ ВИНОВАТ!"; ACC.stmt[v] = "Я ОСТАНОВИЛСЯ ПЕРЕД ПЕРЕХОДОМ, А ОН ВЪЕХАЛ МНЕ В ЗАД.";
+            ACC.witnessText = "ПЕРЕДНЯЯ МАШИНА ТОРМОЗИЛА ПЛАВНО, А " + gd + " ЕХАЛ ВПЛОТНУЮ И НЕ УСПЕЛ.";
+            break;
+        case ACC_LANE:
+            ACC.damage[g] = "ПРАВОЕ ПЕРЕДНЕЕ КРЫЛО"; ACC.damage[v] = "ЛЕВЫЕ ДВЕРИ, ЛЕВОЕ ЗЕРКАЛО";
+            ACC.stmt[g] = "Я ВКЛЮЧИЛ ПОВОРОТНИК! ЭТО ОН УСКОРИЛСЯ!"; ACC.stmt[v] = "Я ЕХАЛ СВОЕЙ ПОЛОСОЙ, ОН ПЕРЕСТРОИЛСЯ ПРЯМО В МЕНЯ.";
+            ACC.witnessText = gd + " РЕЗКО ПЕРЕСТРОИЛСЯ ВПРАВО БЕЗ ПОВОРОТНИКА И ЗАДЕЛ " + vd + ".";
+            break;
+        case ACC_RED:
+            ACC.damage[g] = "ПЕРЕДНЯЯ ЧАСТЬ"; ACC.damage[v] = "ЛЕВЫЙ БОК";
+            ACC.stmt[g] = "У МЕНЯ БЫЛ ЗЕЛЁНЫЙ, ЧЕСТНОЕ СЛОВО!"; ACC.stmt[v] = "У МЕНЯ БЫЛ ЗЕЛЁНЫЙ! ОН ВЫЛЕТЕЛ НА КРАСНЫЙ!";
+            ACC.witnessText = "Я ЖДАЛ НА ПЕРЕХОДЕ. " + gd + " ПРОЕХАЛ НА КРАСНЫЙ, ПЕШЕХОДАМ УЖЕ ГОРЕЛ ЗЕЛЁНЫЙ.";
+            break;
+        case ACC_YIELD:
+            ACC.damage[g] = "ПЕРЕДНЯЯ ЧАСТЬ"; ACC.damage[v] = "ПРАВЫЙ БОК";
+            ACC.stmt[g] = "Я ЕХАЛ ПРЯМО, ОН САМ ВЫСКОЧИЛ!"; ACC.stmt[v] = "Я ПОДЪЕЗЖАЛ СПРАВА, ОН ДОЛЖЕН БЫЛ МЕНЯ ПРОПУСТИТЬ.";
+            ACC.witnessText = "СВЕТОФОР НЕ РАБОТАЛ. " + gd + " НЕ ПРОПУСТИЛ МАШИНУ, КОТОРАЯ БЫЛА У НЕГО СПРАВА.";
+            break;
+    }
+    for (int k = 0; k < 2; k++) {
+        if (ACC.drunk[k] && grng.chance(0.6f)) ACC.stmt[k] += " (ОТ ВОДИТЕЛЯ ПАХНЕТ АЛКОГОЛЕМ)";
+        if (CASES[ACC.caseIdx[k]].female) {
+            static const char* pairs[][2] = {{"Я ВКЛЮЧИЛ ", "Я ВКЛЮЧИЛА "}, {"ОСТАНОВИЛСЯ", "ОСТАНОВИЛАСЬ"}, {"Я ЕХАЛ ", "Я ЕХАЛА "}, {"Я ПОДЪЕЗЖАЛ ", "Я ПОДЪЕЗЖАЛА "}, {"ВИНОВАТ!", "ВИНОВАТА!"}};
+            for (auto& pr : pairs) { size_t pos = 0; while ((pos = ACC.stmt[k].find(pr[0], pos)) != std::string::npos) { ACC.stmt[k].replace(pos, strlen(pr[0]), pr[1]); pos += strlen(pr[1]); } }
+        }
+    }
+    gAccActive = true; gAccPos = ACC.pos;
+    toast("РАЦИЯ: ДТП! СТОЛКНОВЕНИЕ ДВУХ АВТОМОБИЛЕЙ — " + ACC.where + (ACC.injured ? ". ЕСТЬ ПОСТРАДАВШИЙ" : ""), 3, 7);
+    sfx(SFX_RADIO, 0.8f, 0, 0, 2.2f);
+}
+
+static void updateAccident(float dt) {
+    if (!ACC.active) {
+        if (SHF.active && gChaseCar < 0 && SHF.minutes > gNextAccMin && gNextAccMin > 0) { createAccident(); gNextAccMin = SHF.minutes + 110 + grng.i(80); }
+        return;
+    }
+    // машины должны существовать
+    for (int k = 0; k < 2; k++) { int ci = ACC.car[k]; if (ci < 0 || ci >= (int)CARS.size() || !CARS[ci].alive || CARS[ci].id != ACC.carId[k]) { ACC.active = false; gAccActive = false; return; } }
+    float d = dist2d(PL.pos, ACC.pos);
+    if (ACC.stage == 0 && d < 40) { ACC.stage = 1; toast("ВЫ НА МЕСТЕ ДТП. ОСТАНОВИТЕСЬ РЯДОМ И ОФОРМИТЕ.", 0, 3); }
+    if (SHF.minutes > ACC.deadline && ACC.stage == 0) {
+        toast("ДТП ОФОРМИЛ ДРУГОЙ ЭКИПАЖ. ВЫ НЕ УСПЕЛИ. -3 РЕП.", 2, 4); addRep(-3); sfx(SFX_ERROR);
+        clearAccident(false);
+        return;
+    }
+    // дым из-под капота виновника
+    ACC.smokeT -= dt;
+    if (ACC.smokeT <= 0 && d < 120) {
+        ACC.smokeT = 0.18f;
+        const AICar& c = CARS[ACC.car[ACC.guilty]];
+        V3 fp = c.pos + fwdOf(c.yaw) * (CM[c.model].maxZ - 0.6f) + V3(0, CM[c.model].height * 0.6f, 0);
+        emitPart(fp, V3(grng.range(-0.3f, 0.3f), 1.2f, grng.range(-0.3f, 0.3f)), 2.2f, 0.25f, Col(0.55f, 0.55f, 0.57f), 0.35f, 0.9f);
+    }
+}
+
+static void drawAccidentWorld() {
+    if (!ACC.active) return;
+    float d = dist2d(ACC.pos, R3.pos);
+    if (d > 260) return;
+    const AICar& g = CARS[ACC.car[ACC.guilty]];
+    V3 impact = g.pos + fwdOf(g.yaw) * CM[g.model].maxZ;
+    // осколки стекла и пластика
+    for (int i = 0; i < 16; i++) {
+        uint32_t h = hash32(ACC.carId[0] * 131 + i * 7);
+        V3 p = impact + V3(((h % 1000) / 1000.f - 0.5f) * 4, 0.05f, (((h >> 10) % 1000) / 1000.f - 0.5f) * 4);
+        float s = 0.05f + ((h >> 20) % 10) * 0.012f;
+        Col c = (h & 1) ? Col(0.7f, 0.85f, 0.95f) : Col(0.12f, 0.12f, 0.12f);
+        R3.triW(p + V3(-s, 0, 0), p + V3(s, 0, s * 0.5f), p + V3(0, 0, -s), toSDL(litFlat(c)), 0, 0, 0);
+    }
+    // знак аварийной остановки позади
+    const AICar& rear = CARS[ACC.car[0]].s < CARS[ACC.car[1]].s ? CARS[ACC.car[0]] : CARS[ACC.car[1]];
+    V3 f = fwdOf(rear.yaw), r = rightOf(rear.yaw);
+    V3 tp = rear.pos - f * 15;
+    Col red = shadeN(Col(0.9f, 0.08f, 0.05f), -f, tp, L.night * 0.6f);
+    R3.triW(tp - r * 0.25f + V3(0, 0.02f, 0), tp + r * 0.25f + V3(0, 0.02f, 0), tp + V3(0, 0.45f, 0), toSDL(lerpc(red, L.fog, fogFactor(d))), 2, 0, 0);
+    R3.triW(tp - r * 0.15f + V3(0, 0.08f, 0) - f * 0.01f, tp + r * 0.15f + V3(0, 0.08f, 0) - f * 0.01f, tp + V3(0, 0.33f, 0) - f * 0.01f, RGBA(230, 230, 230), 2, 0, -0.02f);
+    if (L.night > 0.3f) R3.billboard(tp + V3(0, 0.2f, 0), 0.4f, 0.4f, toSDL(Col(1, 0.2f, 0.1f) * (0.5f * L.night)), 0, 3, -0.2f);
+    // водители стоят у машин
+    for (int k = 0; k < 2; k++) {
+        const AICar& c = CARS[ACC.car[k]];
+        const Case& cs = CASES[ACC.caseIdx[k]];
+        Ped p; p.alive = true; p.state = 1; p.anim = 0;
+        p.pos = c.pos + rightOf(c.yaw) * (c.halfW + 0.9f) + fwdOf(c.yaw) * (k == 0 ? 0.6f : -0.6f);
+        p.yaw = wrapAngle(c.yaw - PI / 2 + (k ? 0.4f : -0.4f));
+        uint32_t h = hash32(cs.face);
+        static const Col shirts[] = {hexc(0x2a4f8a), hexc(0x8a2a2a), hexc(0x2f6b3a), hexc(0x444444), hexc(0xd8c070), hexc(0xe0e0e0)};
+        p.shirt = shirts[h % 6]; p.pants = hexc(0x2a2f3a); p.skin = hexc(0xe8b896); p.hair = hexc(0x3a2a1a); p.h = cs.female ? 1.66f : 1.78f;
+        drawPed(p);
+    }
+}
 // ---------------------------------------------------------------------
 //  Сцена
 // ---------------------------------------------------------------------
@@ -6645,6 +7001,7 @@ static void drawWorldScene(float dt, bool drawPlayer, bool cockpit) {
     for (const Ped& p : PEDS) if (p.alive) drawPed(p);
     for (size_t i = 0; i < CARS.size(); i++) if (CARS[i].alive) drawAICar(CARS[i], gTime, (int)i == gTarget);
     drawRoadblock(gTime);
+    drawAccidentWorld();
     drawSpeedCams(gTime);
     if (drawPlayer) drawPlayerCar(gTime, cockpit);
     drawParts();
@@ -6701,6 +7058,7 @@ static void clearWorldActors() {
     for (AICar& c : CARS) c.alive = false;
     CARS.clear(); CASES.clear(); PARTS.clear(); PEDS.clear();
     gChaseCar = -1; gBlock.active = false; gTarget = -1; gInspect = -1;
+    ACC = Accident(); gAccActive = false;
 }
 static void startShift() {
     clearWorldActors();
@@ -6712,6 +7070,7 @@ static void startShift() {
     SHF.tutorial = !SV.tutorialShown; SHF.tutStep = 0;
     genTasks();
     TOASTS.clear();
+    gNextAccMin = SHF.minutes + 25 + grng.i(35);
     SV.lastDistrict = SHF.district;
     const Post& P = POSTS[SHF.district];
     PL = PlayerCar(); playerSetCar();
@@ -6805,7 +7164,7 @@ static void updateRadar() {
         const Edge& e = EDGES[c.edge];
         gRadarSpeed = c.speed * 3.6f; gRadarLimit = e.limitKmh;
         float over = gRadarSpeed - e.limitKmh;
-        if (over > 20 && c.viol != 3) { if (c.viol != 2) toast(fmt("РАДАР: %d КМ/Ч ПРИ ОГРАНИЧЕНИИ %d!", (int)gRadarSpeed, (int)e.limitKmh), 2, 2.5f); c.viol = 2; c.violSpeed = std::max(c.violSpeed, gRadarSpeed); c.violLimit = e.limitKmh; }
+        if (over > 10 && c.viol != 3) { if (c.viol != 2) toast(fmt("РАДАР: %d КМ/Ч ПРИ ОГРАНИЧЕНИИ %d!", (int)gRadarSpeed, (int)e.limitKmh), 2, 2.5f); c.viol = 2; c.violSpeed = std::max(c.violSpeed, gRadarSpeed); c.violLimit = e.limitKmh; }
         else if (over > 3 && c.viol == 0) { c.viol = 1; c.violSpeed = gRadarSpeed; c.violLimit = e.limitKmh; }
     }
 }
@@ -7003,6 +7362,7 @@ static void updateDrive(float dt) {
     updatePeds(dt, PL.pos, true);
     updateParts(dt);
     updateRadar();
+    updateAccident(dt);
     pickTarget();
     if (gDemandCooldown > 0) gDemandCooldown -= dt;
     if (gCrashRepCd > 0) gCrashRepCd -= dt;
@@ -7116,6 +7476,7 @@ static void drawMinimap(float x, float y, float sz) {
         else if (c.mode == CMODE_HELPER) dot2(c.pos, RGBA(80, 140, 255), 3.5f);
     }
     if (gBlock.active) dot2(gBlock.pos, RGBA(80, 140, 255), 5);
+    if (ACC.active) dot2(ACC.pos, fmodf(gTime, 0.6f) < 0.3f ? RGBA(255, 60, 40) : C_YELLOW, 5.5f);
     float ox, oy; tr(POSTS[SHF.district].pos, ox, oy);
     if (ox > x && ox < x + sz && oy > y && oy < y + sz) UI.text(ox, oy - 3, "П", 1.2f * U() * 0.8f, RGBA(120, 200, 255), 1);
     UI.tri(cx, cy - 7, cx - 5, cy + 6, cx + 5, cy + 6, C_WHITE);
@@ -7130,8 +7491,24 @@ static void worldLabel(const V3& p, const char* s, SDL_Color c, float sc) {
     UI.text(sx, sy - 7.5f * sc, s, sc, c, 1);
 }
 
+static void drawSpeedLines() {
+    float k = clampf((fabsf(PL.speed) * 3.6f - 90) / 90, 0, 1);
+    if (k <= 0) return;
+    float cx = SW * 0.5f, cy = SH * 0.42f;
+    for (int i = 0; i < 28; i++) {
+        uint32_t h = hash32(i * 977 + 3);
+        float ang = (h % 6283) / 1000.0f;
+        float ph = fmodf(gTime * (1.6f + (h >> 12) % 100 / 60.0f) + (h >> 20) % 100 / 100.0f, 1.0f);
+        float r0 = SH * (0.45f + ph * 0.7f), r1 = r0 + SH * (0.08f + 0.18f * k);
+        float ca = cosf(ang), sa = sinf(ang);
+        float x0 = cx + ca * r0 * 1.6f, y0 = cy + sa * r0, x1 = cx + ca * r1 * 1.6f, y1 = cy + sa * r1;
+        if (y0 > SH * 0.8f) continue;
+        UI.line(x0, y0, x1, y1, std::max(1.5f, SH / 400.0f), RGBA(255, 255, 255, (int)(70 * k * (1 - ph))));
+    }
+}
 static void drawDriveHUD() {
     float u = U();
+    drawSpeedLines();
     float mx = std::max(SW * 0.035f, 16.0f), mt = SH * 0.045f;
     // маркеры над машинами
     for (size_t i = 0; i < CARS.size(); i++) {
@@ -7225,7 +7602,7 @@ static void drawDriveHUD() {
     panel(rx, sy, rw, sh, RGBA(10, 14, 22, 200));
     UI.text(rx + rw / 2, sy + u * 4, "РАДАР", u * 0.9f, RGBA(120, 200, 255), 1);
     if (gRadarSpeed >= 0) {
-        bool ov = gRadarSpeed > gRadarLimit + 20;
+        bool ov = gRadarSpeed > gRadarLimit + 10;
         UI.text(rx + rw / 2, sy + u * 14, fmt("%d", (int)gRadarSpeed).c_str(), u * 2.0f, ov ? RGBA(255, 90, 80) : RGBA(120, 255, 140), 1);
         UI.text(rx + rw / 2, sy + u * 30, fmt("ЛИМИТ %d", (int)gRadarLimit).c_str(), u * 0.8f, C_LIGHT, 1);
     } else UI.text(rx + rw / 2, sy + u * 17, "---", u * 1.6f, RGBA(90, 100, 110), 1);
@@ -7279,6 +7656,25 @@ static void drawDriveHUD() {
         float ry = ay - ab * 0.8f - b * 0.1f;
         if (button(ax, ry, ab, ab * 0.7f, "ПОМОЩЬ", C_BLUE, u * 0.85f, !gHelpUsed)) requestHelp();
         if (button(ax - ab - b * 0.12f, ry, ab, ab * 0.7f, "БЛОКПОСТ", C_BLUE, u * 0.85f, !gBlockUsed)) requestRoadblock();
+    }
+    // вызов на ДТП: метка, указатель, кнопка оформления
+    if (ACC.active) {
+        float d = dist2d(ACC.pos, PL.pos);
+        worldLabel(ACC.pos + V3(0, 3.2f, 0), "ДТП", RGBA(255, 80, 60), u * 1.2f);
+        float iw = u * 108, ix = SW - mx - iw, iy = mt + bs + u * (SHF.wantedCar >= 0 ? 18 : 5);
+        UI.roundRect(ix, iy, iw, u * 22, u * 3, RGBA(140, 25, 20, 210));
+        int left = std::max(0, (int)(ACC.deadline - SHF.minutes));
+        UI.text(ix + u * 22, iy + u * 3, fmt("ДТП: %d М", (int)d).c_str(), u * 1.0f, C_WHITE);
+        UI.text(ix + u * 22, iy + u * 13, ACC.stage == 0 ? fmt("ОСТАЛОСЬ %d МИН", left).c_str() : "ВЫ НА МЕСТЕ", u * 0.75f, C_YELLOW);
+        // стрелка направления относительно курса
+        V3 dv = ACC.pos - PL.pos; float ang = wrapAngle(atan2f(dv.x, dv.z) - PL.yaw);
+        float ax0 = ix + u * 11, ay0 = iy + u * 11, ar = u * 8;
+        float sa = sinf(ang), ca = cosf(ang);
+        UI.tri(ax0 + sa * ar, ay0 - ca * ar, ax0 + ca * ar * 0.55f - sa * ar * 0.5f, ay0 + sa * ar * 0.55f + ca * ar * 0.5f, ax0 - ca * ar * 0.55f - sa * ar * 0.5f, ay0 - sa * ar * 0.55f + ca * ar * 0.5f, C_YELLOW);
+        if (d < 28 && fabsf(PL.speed) < 2.0f && gInspect < 0) {
+            float cw = u * 150, ch = u * 24;
+            if (button(SW / 2 - cw / 2, sy - ch - u * 8, cw, ch, "ОФОРМИТЬ ДТП", RGBA(170, 50, 40), u * 1.3f)) { gScreen = SC_ACCIDENT; PL.speed = 0; sfx(SFX_THUNK); }
+        } else if (d < 28) UI.text(SW / 2, sy - u * 18, "ОСТАНОВИСЬ, ЧТОБЫ ОФОРМИТЬ ДТП", u * 1.0f, C_YELLOW, 1, true);
     }
     // контекстная кнопка: проверить документы
     if (gInspect >= 0 && fabsf(PL.speed) < 2.0f) {
@@ -7642,6 +8038,136 @@ static void drawResult() {
 }
 
 // ---------------------------------------------------------------------
+//  Оформление ДТП
+// ---------------------------------------------------------------------
+static void drawSchemeCar(float cx, float cy, float ang, float s, SDL_Color c, const char* letter) {
+    // прямоугольник машины, повернутый на ang (0 — вверх)
+    float w = s * 0.45f, h = s;
+    float ca = cosf(ang), sa = sinf(ang);
+    auto P = [&](float x, float y, float& ox, float& oy) { ox = cx + x * ca - y * sa; oy = cy + x * sa + y * ca; };
+    float x0, y0, x1, y1, x2, y2, x3, y3;
+    P(-w / 2, -h / 2, x0, y0); P(w / 2, -h / 2, x1, y1); P(w / 2, h / 2, x2, y2); P(-w / 2, h / 2, x3, y3);
+    UI.quad(x0, y0, x1, y1, x2, y2, x3, y3, c);
+    float fx, fy; P(0, -h / 2 - s * 0.45f, fx, fy); float bx, by; P(0, -h / 2, bx, by);
+    UI.line(bx, by, fx, fy, std::max(2.f, s * 0.06f), RGBA(255, 255, 255, 200));
+    float ax1, ay1, ax2, ay2; P(-s * 0.12f, -h / 2 - s * 0.3f, ax1, ay1); P(s * 0.12f, -h / 2 - s * 0.3f, ax2, ay2);
+    UI.tri(fx, fy, ax1, ay1, ax2, ay2, RGBA(255, 255, 255, 200));
+    UI.text(cx, cy - s * 0.18f, letter, s * 0.06f, RGBA(0, 0, 0), 1);
+}
+static void drawScheme(float x, float y, float w, float h) {
+    float u = U();
+    UI.roundRect(x, y, w, h, u * 4, RGBA(70, 110, 70));
+    float cx = x + w / 2, cy = y + h / 2, s = std::min(w, h) * 0.2f;
+    SDL_Color road = RGBA(90, 90, 96), line = RGBA(230, 230, 230);
+    int g = ACC.guilty, v = 1 - g;
+    const char* L[2] = {"А", "Б"};
+    SDL_Color col[2] = {toSDL(CARS[ACC.car[0]].paint * 0.9f + Col(0.08f, 0.08f, 0.08f)), toSDL(CARS[ACC.car[1]].paint * 0.9f + Col(0.08f, 0.08f, 0.08f))};
+    if (ACC.type == ACC_REAREND || ACC.type == ACC_LANE) {
+        UI.rect(cx - s * 1.1f, y + 2, s * 2.2f, h - 4, road);
+        for (float yy = y + 6; yy < y + h - 6; yy += s * 0.5f) UI.rect(cx - 1, yy, 2, s * 0.25f, line);
+        if (ACC.type == ACC_REAREND) { drawSchemeCar(cx + s * 0.55f, cy - s * 0.7f, 0, s, col[v], L[v]); drawSchemeCar(cx + s * 0.55f, cy + s * 0.55f, 0, s, col[g], L[g]); UI.text(cx + s * 0.55f, cy - s * 0.1f, "*", s * 0.09f, C_YELLOW, 1); }
+        else { drawSchemeCar(cx + s * 0.55f, cy - s * 0.3f, 0, s, col[v], L[v]); drawSchemeCar(cx - s * 0.45f, cy + s * 0.2f, 0.45f, s, col[g], L[g]); UI.text(cx + s * 0.05f, cy - s * 0.35f, "*", s * 0.09f, C_YELLOW, 1); }
+        UI.text(x + u * 4, y + u * 3, "ОДНО НАПРАВЛЕНИЕ", u * 0.75f, C_WHITE);
+    } else {
+        UI.rect(cx - s * 0.9f, y + 2, s * 1.8f, h - 4, road);
+        UI.rect(x + 2, cy - s * 0.9f, w - 4, s * 1.8f, road);
+        drawSchemeCar(cx + s * 0.45f, cy + s * 1.0f, 0, s, col[g], L[g]);
+        if (ACC.type == ACC_YIELD) drawSchemeCar(cx + s * 1.2f, cy - s * 0.45f, -PI / 2, s, col[v], L[v]);
+        else drawSchemeCar(cx - s * 1.2f, cy + s * 0.45f, PI / 2, s, col[v], L[v]);
+        UI.text(cx + s * 0.45f, cy + s * 0.25f, "*", s * 0.09f, C_YELLOW, 1);
+        UI.text(x + u * 4, y + u * 3, ACC.type == ACC_RED ? "РЕГУЛИРУЕМЫЙ ПЕРЕКРЁСТОК" : "СВЕТОФОР НЕ РАБОТАЛ", u * 0.75f, C_WHITE);
+        if (ACC.type == ACC_RED) { UI.rect(x + w - u * 12, y + u * 4, u * 7, u * 18, RGBA(20, 20, 20)); for (int k = 0; k < 3; k++) UI.circle(x + w - u * 8.5f, y + u * (7.5f + k * 5.5f), u * 2, k == 0 ? RGBA(200, 40, 40) : (k == 1 ? RGBA(200, 170, 40) : RGBA(40, 180, 80)), 10); }
+    }
+}
+
+static void finishAccident() {
+    int g = ACC.guilty;
+    bool okGuilty = ACC.pickGuilty == g;
+    static const int needArt[ACC_NTYPES] = {AA_DIST, AA_RED, AA_LANE, AA_YIELD};
+    bool okArt = ACC.pickArt == needArt[ACC.type];
+    float late = clampf((SHF.minutes - ACC.callMin - 20) / 55, 0, 1);   // штраф за опоздание
+    int money = 0, rep = 0;
+    gResLines.clear();
+    if (okGuilty && okArt) { money = (int)(2500 * (1 - 0.6f * late)); rep = 6; gResTitle = "ДТП ОФОРМЛЕНО ВЕРНО"; gResGood = true; }
+    else if (okGuilty) { money = 800; rep = 1; gResTitle = "ВИНОВНИК ВЕРНЫЙ, НО СТАТЬЯ НЕ ТА"; gResGood = false; }
+    else { money = -500; rep = -6; gResTitle = "ОШИБКА: НАКАЗАН НЕВИНОВНЫЙ!"; gResGood = false; SV.complaints++; }
+    const char* L[2] = {"А", "Б"};
+    gResLines.push_back(std::string("ВИНОВНИК: ВОДИТЕЛЬ ") + L[g] + " (" + carDesc(ACC.car[g]) + ")");
+    gResLines.push_back(std::string("СТАТЬЯ: ") + ACC_ART_NAMES[needArt[ACC.type]]);
+    gResLines.push_back("- " + ACC.witnessText);
+    for (int k = 0; k < 2; k++) if (ACC.drunk[k]) {
+        if (ACC.tested[k]) { money += 1500; rep += 2; gResLines.push_back(std::string("+ ВОДИТЕЛЬ ") + L[k] + " ПЬЯН — ОТСТРАНЁН ОТ УПРАВЛЕНИЯ (12.8)"); }
+        else { rep -= 3; gResLines.push_back(std::string("- ПРОПУЩЕНО: ВОДИТЕЛЬ ") + L[k] + " БЫЛ ПЬЯН (НЕ ПРОВЕРЕН АЛКОТЕСТЕРОМ)"); }
+    }
+    if (ACC.injured) {
+        if (ACC.ambulance) { rep += 1; gResLines.push_back("+ ПОСТРАДАВШЕМУ ВЫЗВАНА СКОРАЯ"); }
+        else { rep -= 4; money -= 300; gResLines.push_back("- НЕ ВЫЗВАНА СКОРАЯ ДЛЯ ПОСТРАДАВШЕГО!"); }
+    }
+    if (late > 0.01f) gResLines.push_back(fmt("ОПОЗДАНИЕ: НАГРАДА МЕНЬШЕ НА %d%%", (int)(late * 60)));
+    gResMoney = money; gResRep = rep;
+    SV.money = std::max(0, SV.money + money); addRep(rep);
+    if (gResGood) { SHF.correct++; SV.totalCorrect++; sfx(SFX_COIN); taskProgress(T_ACCIDENT); } else { SHF.wrong++; SV.totalWrong++; sfx(SFX_ERROR); }
+    SHF.accidents++;
+    SHF.minutes += 10;
+    clearAccident(true);
+    gScreen = SC_RESULT; gInspect = -1;
+}
+
+static void drawAccidentScreen(float dt) {
+    (void)dt;
+    float u = U();
+    UI.rect(0, 0, SW, SH, RGBA(0, 0, 0, 150));
+    float mx = std::max(SW * 0.035f, 16.0f), mt = SH * 0.04f, W = SW - mx * 2;
+    panel(mx, mt, W, u * 20, C_DARK);
+    UI.text(mx + u * 6, mt + u * 6, ("ОФОРМЛЕНИЕ ДТП: " + ACC.where).c_str(), u * 1.05f, C_WHITE);
+    float y0 = mt + u * 24, colW = W * 0.3f, colH = SH * 0.66f;
+    const char* L[2] = {"А", "Б"};
+    for (int k = 0; k < 2; k++) {
+        float x = k == 0 ? mx : mx + W - colW;
+        panel(x, y0, colW, colH, C_DARK);
+        const Case& cs = CASES[ACC.caseIdx[k]];
+        UI.text(x + u * 5, y0 + u * 4, (std::string("ВОДИТЕЛЬ ") + L[k] + ": " + cs.sur + " " + firstLetter(cs.name) + ".").c_str(), u * 0.9f, RGBA(150, 200, 255));
+        UI.text(x + u * 5, y0 + u * 14, carDesc(ACC.car[k]).c_str(), u * 0.8f, C_LIGHT);
+        float fw = colW * 0.42f, fh = fw * 1.15f;
+        drawFace(x + u * 5, y0 + u * 24, fw, fh, cs.face, cs.female, cs.age, true, true, true);
+        float tx = x + fw + u * 9, tw = colW - fw - u * 14;
+        UI.text(tx, y0 + u * 25, "ПОВРЕЖДЕНИЯ:", u * 0.75f, RGBA(255, 180, 120));
+        UI.textBox(tx, y0 + u * 34, tw, ACC.damage[k].c_str(), u * 0.8f, C_WHITE);
+        float sy = y0 + u * 28 + fh;
+        float hh = UI.textBox(x + u * 5, sy, colW - u * 10, ("«" + ACC.stmt[k] + "»").c_str(), u * 0.85f, C_WHITE);
+        float by = std::max(sy + hh + u * 4, y0 + colH - u * 24);
+        if (!ACC.tested[k]) { if (button(x + u * 5, by, colW - u * 10, u * 19, "АЛКОТЕСТЕР", RGBA(110, 80, 160), u * 0.95f)) { ACC.tested[k] = true; sfx(SFX_BEEP, 0.6f, 1300, 1300, 0.6f); } }
+        else UI.text(x + colW / 2, by + u * 5, ACC.drunk[k] ? "0.62 МГ/Л — ОПЬЯНЕНИЕ!" : "0.00 МГ/Л — ТРЕЗВ", u * 0.95f, ACC.drunk[k] ? RGBA(255, 110, 100) : RGBA(120, 255, 140), 1);
+    }
+    // центр: схема, свидетель, скорая
+    float cx = mx + colW + u * 6, cw = W - 2 * colW - u * 12;
+    float schH = SH * 0.3f;
+    drawScheme(cx, y0, cw, schH);
+    float ty = y0 + schH + u * 5;
+    if (!ACC.witness) { if (button(cx, ty, cw, u * 19, "ОПРОСИТЬ СВИДЕТЕЛЯ", C_GRAY, u * 0.95f)) { ACC.witness = true; sfx(SFX_SPEECH, 0.7f, 160, 0, 1.4f); } ty += u * 23; }
+    else { panel(cx, ty, cw, u * 36, RGBA(30, 40, 30, 230)); UI.textBox(cx + u * 4, ty + u * 3, cw - u * 8, ("СВИДЕТЕЛЬ: «" + ACC.witnessText + "»").c_str(), u * 0.75f, C_WHITE); ty += u * 40; }
+    if (ACC.injured) {
+        if (!ACC.ambulance) { if (button(cx, ty, cw, u * 19, "ВЫЗВАТЬ СКОРУЮ (ЖАЛОБЫ НА БОЛЬ)", RGBA(170, 50, 50), u * 0.85f)) { ACC.ambulance = true; sfx(SFX_RADIO, 0.6f); } }
+        else UI.text(cx + cw / 2, ty + u * 5, "СКОРАЯ ВЫЗВАНА", u * 0.9f, RGBA(120, 255, 140), 1);
+        ty += u * 23;
+    }
+    // нижняя панель: виновник и статья
+    float by = y0 + colH + u * 5;
+    float bh = u * 20;
+    UI.text(mx, by + u * 6, "ВИНОВНИК:", u * 0.9f, C_WHITE);
+    float bx = mx + u * 50;
+    for (int k = 0; k < 2; k++) if (button(bx + k * (u * 42), by, u * 38, bh, (std::string("ВОДИТ. ") + L[k]).c_str(), ACC.pickGuilty == k ? C_BLUE : C_GRAY, u * 0.85f)) ACC.pickGuilty = k;
+    float ax = bx + u * 90, aw = (mx + W - ax - u * 96 - 3 * u * 3) / 4;
+    for (int a = 0; a < AA_N; a++) {
+        static const char* shortN[AA_N] = {"12.15 ДИСТАНЦИЯ", "12.12 КРАСНЫЙ", "12.14 ПЕРЕСТРОЕН.", "12.13 ПОМЕХА СПРАВА"};
+        if (button(ax + a * (aw + u * 3), by, aw, bh, shortN[a], ACC.pickArt == a ? RGBA(200, 140, 20) : C_GRAY, u * 0.75f)) ACC.pickArt = a;
+    }
+    bool ready = ACC.pickGuilty >= 0 && ACC.pickArt >= 0;
+    if (button(mx + W - u * 90, by, u * 90, bh, "ОФОРМИТЬ", C_GREEN, u * 1.0f, ready)) finishAccident();
+    if (gBackPressed) { gBackPressed = false; gScreen = SC_DRIVE; }
+}
+
+// ---------------------------------------------------------------------
 //  Карта и камеры
 // ---------------------------------------------------------------------
 static int gMapConfirmCam = -1;
@@ -7676,6 +8202,7 @@ static void drawMap() {
         V3 p; float y; camWorldPos(SPEEDCAMS[i], p, y); float sx, sy; P(p, sx, sy);
         UI.roundRect(sx - u * 4, sy - u * 4, u * 8, u * 8, u * 2, (int)i == gMapConfirmCam ? C_RED : C_YELLOW);
     }
+    if (ACC.active) { float sx, sy; P(ACC.pos, sx, sy); UI.circle(sx, sy, u * 6, fmodf(gTime, 0.6f) < 0.3f ? RGBA(255, 60, 40) : C_YELLOW, 16); UI.text(sx, sy - u * 15, "ДТП", u * 0.9f, C_WHITE, 1, true); }
     if (SHF.active) { float sx, sy; P(PL.pos, sx, sy); V3 f = fwdOf(PL.yaw); UI.circle(sx, sy, u * 4, C_WHITE); UI.line(sx, sy, sx + f.x * u * 9, sy - f.z * u * 9, u * 2, C_WHITE); }
     // правая панель
     float px = mx + areaW + u * 10, pw = SW - px - mx;
@@ -8000,6 +8527,7 @@ static void drawSummary(float dt) {
     row(x1, ya, "ШТРАФОВ:", fmt("%d НА %d ₽", SHF.fines, SHF.finesSum), C_WHITE);
     row(x1, ya, "ЗАДЕРЖАНО:", fmt("%d", SHF.detains), C_WHITE);
     row(x1, ya, "ПОГОНЬ / УСПЕШНЫХ:", fmt("%d / %d", SHF.chases, SHF.chaseWins), C_WHITE);
+    row(x1, ya, "ОФОРМЛЕНО ДТП:", fmt("%d", SHF.accidents), C_WHITE);
     row(x2, yb, "ЗАРПЛАТА:", fmt("%d ₽", (int)SHF.lastCamMin), C_YELLOW);
     row(x2, yb, "ПРЕМИИ И ЗАДАНИЯ:", fmt("%d ₽", SHF.bonus), C_YELLOW);
     row(x2, yb, "ДОХОД С КАМЕР:", fmt("%d ₽", SHF.camIncome), C_YELLOW);
@@ -8020,14 +8548,15 @@ static void drawHelp() {
     const char* left =
         "ЗАДЕРЖАНИЕ: ПОДДЕЛЬНОЕ УДОСТОВЕРЕНИЕ (ОШИБКА В ЗАГОЛОВКЕ, НЕТ ГОЛОГРАММЫ, НЕТ В БАЗЕ), НОМЕРА НЕ СОВПАДАЮТ СО СТС, АВТОМОБИЛЬ В УГОНЕ, КОНТРАБАНДА ИЛИ КРАДЕНОЕ, ПОПЫТКА СКРЫТЬСЯ.\n"
         "ЭВАКУАЦИЯ: НЕТ ДЕЙСТВУЮЩИХ ПРАВ — УДОСТОВЕРЕНИЕ ПРОСРОЧЕНО (П. 4В), ЧУЖОЕ (ДРУГОЕ ФОТО И ИМЯ), ЛИШЁН ПРАВ (ВИДНО В БАЗЕ).\n"
-        "ШТРАФ: ПРЕВЫШЕНИЕ БОЛЕЕ 20 КМ/Ч (12.9), КРАСНЫЙ (12.12), НЕТ/ПРОСРОЧЕН ОСАГО, ОСАГО НА ДРУГУЮ МАШИНУ ИЛИ ВОДИТЕЛЬ НЕ ВПИСАН (12.37), НЕ ПРИСТЁГНУТ (12.6 — РЕМНЯ НЕТ НА ФОТО ВОДИТЕЛЯ). ОТМЕТЬ ВСЕ НАРУШЕННЫЕ СТАТЬИ.\n"
-        "ПРЕДУПРЕЖДЕНИЕ: ПРЕВЫШЕНИЕ ДО 20 КМ/Ч БЕЗ ДРУГИХ НАРУШЕНИЙ.\n"
+        "ШТРАФ: ПРЕВЫШЕНИЕ БОЛЕЕ 10 КМ/Ч (12.9), КРАСНЫЙ (12.12), НЕТ/ПРОСРОЧЕН ОСАГО, ОСАГО НА ДРУГУЮ МАШИНУ ИЛИ ВОДИТЕЛЬ НЕ ВПИСАН (12.37), НЕ ПРИСТЁГНУТ (12.6 — РЕМНЯ НЕТ НА ФОТО ВОДИТЕЛЯ). ОТМЕТЬ ВСЕ НАРУШЕННЫЕ СТАТЬИ.\n"
+        "ПРЕДУПРЕЖДЕНИЕ: ПРЕВЫШЕНИЕ ДО 10 КМ/Ч БЕЗ ДРУГИХ НАРУШЕНИЙ.\n"
         "ОТПУСТИТЬ: ВСЁ В ПОРЯДКЕ. СОБСТВЕННИК В СТС МОЖЕТ БЫТЬ ДРУГИМ — ЭТО НЕ НАРУШЕНИЕ.";
     const char* right =
         "УПРАВЛЕНИЕ: СЛЕВА — РУЛЬ, СПРАВА — ГАЗ И ТОРМОЗ (ДОЛГО ДЕРЖАТЬ ТОРМОЗ = ЗАДНИЙ ХОД). МОЖНО ЖАТЬ ОДНОВРЕМЕННО.\n"
         "МИГАЛКА ВКЛЮЧАЕТ СВЕТ И СИРЕНУ — МАШИНЫ УСТУПАЮТ ДОРОГУ И ЧАЩЕ ПОДЧИНЯЮТСЯ.\n"
         "ТРЕБОВАТЬ (НА ХОДУ) ИЛИ ЖЕЗЛ (СТОЯ) — ОСТАНОВИТЬ МАШИНУ В ЖЁЛТОЙ РАМКЕ. РАДАР ПОКАЗЫВАЕТ СКОРОСТЬ МАШИНЫ ВПЕРЕДИ.\n"
         "ПОГОНЯ: ДЕРЖИСЬ БЛИЖЕ И ТОЛКАЙ БЕГЛЕЦА, ПОКА НЕ ЗАПОЛНИТСЯ ШКАЛА. ВЫЗОВИ ПОМОЩЬ И БЛОКПОСТ. ОТСТАНЕШЬ — ПРОВАЛ.\n"
+        "ДТП: ЕДЬ ПО СТРЕЛКЕ, ОСТАНОВИСЬ У МЕСТА И ОФОРМИ. ВИНОВНИК: ВЪЕХАЛ СЗАДИ — 12.15, ПЕРЕСТРОИЛСЯ В ДРУГУЮ МАШИНУ — 12.14, НЕ ПРОПУСТИЛ МАШИНУ СПРАВА БЕЗ СВЕТОФОРА — 12.13, ПРОЕХАЛ НА КРАСНЫЙ — 12.12. ПРОВЕРЯЙ АЛКОТЕСТЕРОМ, ВЫЗЫВАЙ СКОРУЮ.\n"
         "ПРИДИРКИ К ЧЕСТНЫМ ВОДИТЕЛЯМ ВЕДУТ К ЖАЛОБАМ И ШТРАФАМ. ЗВАНИЯ ОТКРЫВАЮТ НОВЫЕ УЧАСТКИ И МАШИНЫ.";
     UI.textBox(mx, mt + u * 22, colW, left, u * 0.95f, C_LIGHT);
     UI.textBox(mx + colW + u * 10, mt + u * 22, colW, right, u * 0.95f, C_LIGHT);
@@ -8135,6 +8664,13 @@ static void frame(float dt) {
             else if (gScreen == SC_RESULT) drawResult();
             else drawPause();
         } break;
+        case SC_ACCIDENT:
+            SY.siren = 0; SY.engLoad = 0;
+            if (!ACC.active) { gScreen = SC_DRIVE; break; }
+            updateCamera(0, false);
+            drawWorldScene(dt, true, gCamMode == 1);
+            drawAccidentScreen(dt);
+            break;
         case SC_TRUNK:
             SY.siren = 0; SY.engLoad = 0;
             if (gInspect < 0 || !CARS[gInspect].alive || CARS[gInspect].caseIdx < 0) { gScreen = SC_DRIVE; break; }
