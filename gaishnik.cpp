@@ -37035,7 +37035,7 @@ struct AICar {
     int edge = 0, dir = 0, lane = 0; float s = 0;
     bool turning = false; float tt = 0, tlen = 1; V3 b0, b1, b2; int nEdge = 0, nDir = 0, nLane = 0;
     int planEdge = -1, planDir = 0;
-    float lat = 0, latTarget = 0, latV = 0; int yieldMode = -1; float pullWait = 0;
+    float lat = 0, latTarget = 0, latV = 0; int yieldMode = -1; float pullWait = 0; bool hornYield = false;
     V3 pos; float yaw = 0, speed = 0, desired = 1;
     float pitch = 0, roll = 0, pv = 0, rv = 0, spin = 0, steerVis = 0, lastSpeed = 0, lastYaw = 0;
     int mode = CMODE_DRIVE; float modeT = 0;
@@ -37686,11 +37686,12 @@ static void updateAICar(AICar& c, int idx, float dt) {
                     bool toShoulder = c.yieldMode == 1;
                     c.latTarget = toShoulder ? shoulderLat(c) * 0.8f : 0.0f; v0 *= toShoulder ? 0.6f : 0.85f;
                 }
+                else if (c.hornYield) { c.latTarget = std::min(shoulderLat(c), 0.9f); v0 = std::max(v0, lim * 1.12f); }   // в городе на гудок — прижаться и прибавить
                 else { c.latTarget = std::min(shoulderLat(c), 0.6f); v0 *= 0.6f; }   // в городе — прижаться вправо, не на тротуар
             }
-            c.blink = c.latTarget > 0.3f ? 1 : 0;
-            if (c.yieldT <= 0) { c.latTarget = 0; c.blink = 0; c.yieldMode = -1; }
-        } else { c.latTarget = 0; c.yieldMode = -1; }
+            c.blink = (c.latTarget > 0.3f || c.lat < -0.3f) ? 1 : 0;   // поворотник и при перестроении вправо
+            if (c.yieldT <= 0) { c.latTarget = 0; c.blink = 0; c.yieldMode = -1; c.hornYield = false; }
+        } else { c.latTarget = 0; c.yieldMode = -1; c.hornYield = false; }
         // гудок игрока: водитель впереди в той же полосе замечает и реагирует
         if (gHornT > 0 && c.hornT <= 0 && !c.turning) {
             V3 dd = c.pos - PL.pos; float along = dot(dd, fwdOf(PL.yaw)), lat = fabsf(dot(dd, rightOf(PL.yaw)));
@@ -37701,17 +37702,19 @@ static void updateAICar(AICar& c, int idx, float dt) {
             float prev = c.hornT;
             c.hornT -= dt;
             if (prev >= 3.0f && c.hornT < 3.0f) {   // ~0.6 с на реакцию
-                bool grumpy = (c.id % 5 == 0) && !PL.siren;   // кто-то в ответ сам сигналит и притормаживает
+                bool grumpy = (c.id % 10 == 3) && !PL.siren;   // редкий водитель сначала сигналит в ответ и тормозит назло
                 if (grumpy) {
                     float dd = dist2d(c.pos, PL.pos);
                     sfx(SFX_HORN, clampf(0.7f - dd / 80, 0.15f, 0.6f), 0, 0, 0.7f);
-                    c.hornT = 1.2f;          // короткое «торможение назло»
+                    c.hornT = 1.6f;
                 } else {
-                    c.yieldT = std::max(c.yieldT, 3.0f);   // прижаться вправо / уйти из полосы, пропустить
+                    c.yieldT = std::max(c.yieldT, 3.5f); c.hornYield = true;   // уйти вправо и пропустить
                     if (c.speed < 0.5f && c.stuckD > 2) c.stuckD = std::max(c.stuckD, 43.f);   // стоит не на красный — тронется
                 }
             }
-            if (c.hornT < 1.2f && c.hornT > 0.4f && (c.id % 5 == 0) && !PL.siren) v0 *= 0.5f;
+            bool grumpyNow = (c.id % 10 == 3) && !PL.siren && c.hornT > 0 && c.hornT < 1.6f;
+            if (grumpyNow && c.hornT > 0.8f) v0 *= 0.5f;                              // «торможение назло»...
+            if (grumpyNow && c.hornT - dt <= 0.8f && c.hornT > 0.8f - dt * 1.5f) { c.yieldT = std::max(c.yieldT, 3.0f); c.hornYield = true; }   // ...но потом всё же уступает
         }
         // место ДТП: «зеваки» притормаживают
         if (gAccActive && !c.crashed && dist2d(c.pos, gAccPos) < 70) v0 = std::min(v0, (e.highway ? 40.f : 25.f) / 3.6f);
