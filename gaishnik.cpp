@@ -685,7 +685,7 @@ static UIBatch UI;
 // ---------------------------------------------------------------------
 //  Звук: синтез в аудио-колбэке
 // ---------------------------------------------------------------------
-enum SfxType { SFX_BEEP, SFX_COIN, SFX_ERROR, SFX_CRASH, SFX_SHUTTER, SFX_SPEECH, SFX_RADIO, SFX_THUNK, SFX_HORN, SFX_WHISTLE, SFX_CLICK, SFX_SUCCESS, SFX_TYPE, SFX_SHOT };
+enum SfxType { SFX_BEEP, SFX_COIN, SFX_ERROR, SFX_CRASH, SFX_SHUTTER, SFX_SPEECH, SFX_RADIO, SFX_THUNK, SFX_HORN, SFX_WHISTLE, SFX_CLICK, SFX_SUCCESS, SFX_TYPE, SFX_SHOT, SFX_QUACK };
 struct Voice { int type; float t, dur, f0, f1, vol, ph, ph2, lp, seed; bool on; };
 struct Synth {
     int rate = 44100;
@@ -773,6 +773,16 @@ static void audioCallback(void*, Uint8* stream, int len) {
                     o = (w * 0.9f * (tt < 0.05f ? 1.f : 0.25f) + v.lp * 0.8f) * env + sinf(v.ph * 2 * PI) * env * 0.9f;
                     o = clampf(o * 1.3f, -1, 1);
                 } break;
+                case SFX_QUACK: {   // «крякалка» СГУ: резкий спад тона с рычащей модуляцией
+                    float t = v.t;
+                    float f = 360 + 980 * expf(-t * 11.0f) + 25 * sinf(t * 2 * PI * 9);
+                    v.ph += f * dt; if (v.ph > 1) v.ph -= 1;
+                    v.ph2 += f * 1.007f * dt; if (v.ph2 > 1) v.ph2 -= 1;
+                    float sq = v.ph < 0.5f ? 1.f : -1.f, saw = v.ph2 * 2 - 1;
+                    float growl = 0.55f + 0.45f * (fmodf(t * 47.0f, 1.0f) < 0.5f ? 1.f : -1.f);
+                    float env = clampf(t / 0.008f, 0, 1) * (tt < 0.8f ? 1.f : (1 - tt) * 5);
+                    o = clampf((sq * 0.6f + saw * 0.5f) * growl * 1.4f, -0.85f, 0.85f) * env;
+                } break;
                 case SFX_SHUTTER: { o = s.nz() * (tt < 0.15f || (tt > 0.5f && tt < 0.6f) ? 0.8f : 0.0f); } break;
                 case SFX_THUNK: { v.ph += lerpf(v.f0, v.f1, tt) * dt; o = sinf(v.ph * 2 * PI) * (1 - tt) * (1 - tt) * 1.2f + s.nz() * (1 - tt) * 0.2f * (tt < 0.1f); } break;
                 case SFX_HORN: { v.ph += 370 * dt; v.ph2 += 466 * dt; o = ((v.ph - floorf(v.ph) < 0.5f ? 1 : -1) + (v.ph2 - floorf(v.ph2) < 0.5f ? 1 : -1)) * 0.22f * (tt < 0.95f ? 1 : (1 - tt) * 20); } break;
@@ -819,6 +829,7 @@ static void sfx(int type, float vol = 1, float f0 = 0, float f1 = 0, float dur =
         case SFX_CRASH: v.dur = 0.6f; break;
         case SFX_SHUTTER: v.dur = 0.12f; break;
         case SFX_SHOT: v.dur = 0.6f; break;
+        case SFX_QUACK: v.dur = dur ? dur : 0.42f; break;
         case SFX_THUNK: v.f0 = 140; v.f1 = 60; v.dur = 0.18f; break;
         case SFX_HORN: v.dur = dur ? dur : 0.5f; break;
         case SFX_WHISTLE: v.f0 = 2600; v.dur = dur ? dur : 0.7f; break;
@@ -37035,7 +37046,7 @@ struct AICar {
     int edge = 0, dir = 0, lane = 0; float s = 0;
     bool turning = false; float tt = 0, tlen = 1; V3 b0, b1, b2; int nEdge = 0, nDir = 0, nLane = 0;
     int planEdge = -1, planDir = 0;
-    float lat = 0, latTarget = 0, latV = 0; int yieldMode = -1; float pullWait = 0; bool hornYield = false;
+    float lat = 0, latTarget = 0, latV = 0; int yieldMode = -1; float pullWait = 0; bool hornYield = false; float holdV = -1;
     V3 pos; float yaw = 0, speed = 0, desired = 1;
     float pitch = 0, roll = 0, pv = 0, rv = 0, spin = 0, steerVis = 0, lastSpeed = 0, lastYaw = 0;
     int mode = CMODE_DRIVE; float modeT = 0;
@@ -37065,6 +37076,20 @@ static std::vector<Camera_> SPEEDCAMS;
 struct Roadblock { bool active = false; int edge, dir; float s; V3 pos; float yaw; };
 static Roadblock gBlock;
 static float gHornT = 0;   // игрок только что посигналил
+// ---- плотность трафика по зонам и времени суток → доход ----
+static float gClockMin = 480;                              // текущее время смены (мин от полуночи), ставит игра
+static const float DISTRICT_TRAFFIC[4] = {1.0f, 0.75f, 1.1f, 1.35f};   // город, восточная (тихая), северная, западная (федеральная)
+static float hourTraffic(float minutes) {
+    float h = fmodf(minutes / 60.0f, 24.0f);
+    // гладкая кривая: ночью пусто, утренний и вечерний час пик
+    auto bump = [](float x, float c, float w) { float d = (x - c) / w; return expf(-d * d); };
+    float k = 0.4f + 0.6f * clampf((h - 5.5f) / 2.0f, 0, 1) * (1 - clampf((h - 21.0f) / 2.5f, 0, 1));
+    k += 0.45f * bump(h, 8.3f, 1.3f) + 0.5f * bump(h, 18.2f, 1.5f);
+    return k;
+}
+static float trafficLevelAt(const V3& p) { return DISTRICT_TRAFFIC[districtAt(p)] * hourTraffic(gClockMin); }
+static float payMulAt(const V3& p) { float m = 0.5f + 0.62f * trafficLevelAt(p); m = roundf(m * 20) / 20; return clampf(m, 0.75f, 1.8f); }
+static const char* trafficName(float lv) { return lv < 0.55f ? "СЛАБЫЙ" : (lv < 0.9f ? "СРЕДНИЙ" : (lv < 1.3f ? "ПЛОТНЫЙ" : "ЧАС ПИК")); }
 static int bitCount(int m) { int n = 0; while (m) { n += m & 1; m >>= 1; } return n; }
 
 // --- частицы ---
@@ -37377,14 +37402,24 @@ static bool nodeConflict(const AICar& c, int idx, int node) {
     for (size_t i = 0; i < CARS.size(); i++) {
         if ((int)i == idx) continue;
         const AICar& o = CARS[i];
-        if (!o.alive || !o.turning || o.crashed || o.mode == CMODE_HELPER) continue;
+        if (!o.alive || o.crashed || o.mode == CMODE_HELPER) continue;
         const Edge& oe = EDGES[o.edge];
-        if (edgeEndNode(oe, o.dir) != node || o.tt > 0.88f) continue;
-        if (o.speed < 0.5f && o.stuckD > 6) continue;   // сама стоит в заторе — не держим перекрёсток
+        if (edgeEndNode(oe, o.dir) != node) continue;
+        int ots;
+        if (o.turning) {
+            if (o.tt > 0.88f) continue;
+            if (o.speed < 0.5f && o.stuckD > 6) continue;   // сама стоит в заторе — не держим перекрёсток
+            ots = turnSign(oe, o.dir, o.nEdge, o.nDir);
+        } else {
+            // ещё не въехала, но вот-вот въедет: одновременно не заезжаем — первой идёт та, что ближе (при равенстве — меньший номер)
+            float oEnd = oe.slen - o.s, myEnd = e.slen - c.s;
+            if (oEnd > 3.0f || o.speed < 0.8f || o.planEdge < 0) continue;
+            if (oEnd > myEnd + 0.3f || (fabsf(oEnd - myEnd) <= 0.3f && o.id > c.id)) continue;
+            ots = turnSign(oe, o.dir, o.planEdge, o.planDir);
+        }
         V3 of = o.dir == 0 ? oe.dir : -oe.dir;
         float d = dot(myF, of);
         if (d > 0.7f) continue;                                   // та же полоса подхода — обычная очередь
-        int ots = turnSign(oe, o.dir, o.nEdge, o.nDir);
         if (d < -0.7f && myTs == 0 && ots == 0) continue;         // встречные прямо — не мешают
         if (d < -0.7f && myTs == 1 && ots == 1) continue;         // встречные направо — не мешают
         return true;
@@ -37709,7 +37744,6 @@ static void updateAICar(AICar& c, int idx, float dt) {
                     c.hornT = 1.6f;
                 } else {
                     c.yieldT = std::max(c.yieldT, 3.5f); c.hornYield = true;   // уйти вправо и пропустить
-                    if (c.speed < 0.5f && c.stuckD > 2) c.stuckD = std::max(c.stuckD, 43.f);   // стоит не на красный — тронется
                 }
             }
             bool grumpyNow = (c.id % 10 == 3) && !PL.siren && c.hornT > 0 && c.hornT < 1.6f;
@@ -37770,10 +37804,21 @@ static void updateAICar(AICar& c, int idx, float dt) {
         }
     }
     carAccel(c, v0, gap, vl, dt, amax, bcomf);
+    if (c.holdV >= 0) { c.speed = std::min(c.speed, c.holdV); c.holdV = -1; }
     // страховка от редких тупиков: долго стоим не на красный — проезжаем «сквозь»
     if (c.ghostT > 0) c.ghostT -= dt;
     bool nearBlock = gBlock.active && dist2d(c.pos, gBlock.pos) < 150;
-    if ((c.mode == CMODE_DRIVE || c.mode == CMODE_LEAVE) && c.speed < 0.2f && !redStop && !nearBlock) { c.stuckD += dt; if (c.stuckD > 45) { c.ghostT = 2.5f; c.stuckD = 0; } } else c.stuckD = 0;
+    if ((c.mode == CMODE_DRIVE || c.mode == CMODE_LEAVE) && c.speed < 0.2f && !redStop && !nearBlock) {
+        c.stuckD += dt;
+        if (c.stuckD > 45) {
+            // тупик: сквозь машины больше не проезжаем. Невидимую игроку машину тихо убираем,
+            // видимая ждёт, пока затор рассосётся сам
+            bool special = c.caseIdx >= 0 || c.wanted || c.crashed || c.vanish;
+            bool seen = R3.sphereVisible(c.pos + V3(0, 1, 0), c.halfL + 1) && dist2d(c.pos, PL.pos) < 160;
+            if (!special && !seen) { c.alive = false; return; }
+            c.stuckD = 30;
+        }
+    } else c.stuckD = 0;
     // обгон/перестроение на трассе
     if (!c.turning && e.lanes > 1 && (c.mode == CMODE_DRIVE || c.mode == CMODE_FLEE)) {
         if (gap < 35 && vl < v0 * 0.85f && c.lane == 1 && grng.chance(dt * (c.mode == CMODE_FLEE ? 4.0f : 0.8f))) tryLaneChange(c, 0);
@@ -37878,7 +37923,7 @@ static void collidePlayerCars(float dt) {
 static void updateTraffic(float dt, bool spawn) {
     if (gHornT > 0) gHornT -= dt;
     V3 center = PL.pos;
-    int target = districtAt(center) == 0 ? 30 : 22;
+    int target = (int)clampf((districtAt(center) == 0 ? 26.f : 22.f) * trafficLevelAt(center), 9, 42);
     int alive = 0;
     for (size_t i = 0; i < CARS.size(); i++) {
         AICar& c = CARS[i]; if (!c.alive) continue;
@@ -37905,21 +37950,55 @@ static void updateTraffic(float dt, bool spawn) {
             }
         }
     }
-    // страховка: машина, догнавшая другую вплотную, останавливается, а не проезжает сквозь
+    // страховка от «въезда друг в друга»: у каждой машины перед бампером «щуп»; если он задевает
+    // другую машину (в любом направлении) — стоп. Если две машины упёрлись друг в друга носами,
+    // уступает та, у которой соседка прямо по курсу, а вторая медленно проезжает, пока нет касания кузовом.
+    auto boxHit = [](const V3& ap, float ayaw, float ahl, float ahw, float probe, const V3& bp, float byaw, float bhl, float bhw) {
+        V3 fa = fwdOf(ayaw), ra = rightOf(ayaw), fb = fwdOf(byaw), rb = rightOf(byaw);
+        V3 ac = ap + fa * (probe * 0.5f); float hl = ahl + probe * 0.5f;
+        V3 dc = bp - ac;
+        V3 axes[4] = {fa, ra, fb, rb};
+        for (int ax = 0; ax < 4; ax++) {
+            V3 n = axes[ax];
+            float r1 = fabsf(dot(fa, n)) * hl + fabsf(dot(ra, n)) * ahw;
+            float r2 = fabsf(dot(fb, n)) * bhl + fabsf(dot(rb, n)) * bhw;
+            if (fabsf(dot(dc, n)) > r1 + r2) return false;
+        }
+        return true;
+    };
     for (size_t i = 0; i < CARS.size(); i++) {
         AICar& a = CARS[i];
-        if (!a.alive || a.crashed || a.mode == CMODE_HELPER || a.mode == CMODE_STOPPED || a.speed < 0.5f) continue;
+        if (!a.alive || a.crashed || a.mode == CMODE_HELPER || a.mode == CMODE_STOPPED || a.mode == CMODE_BLOCK) continue;
         if (dist2d(a.pos, center) > 300) continue;
         V3 fa = fwdOf(a.yaw);
+        float probe = 0.5f + a.speed * 0.25f;
         for (size_t j = 0; j < CARS.size(); j++) {
             if (i == j) continue;
             const AICar& b = CARS[j];
-            if (!b.alive || b.mode == CMODE_HELPER) continue;
-            V3 d = b.pos - a.pos; float dd = len(d);
-            if (dd > a.halfL + b.halfL + 1.0f) continue;
-            float along = dot(d, fa), lat = fabsf(dot(d, rightOf(a.yaw)));
-            if (dot(fwdOf(b.yaw), fa) < 0.5f) continue;   // только попутные (пересекающиеся решает правило перекрёстка)
-            if (along > 0 && lat < a.halfW + b.halfW && along < a.halfL + b.halfL + 0.4f) { a.speed = std::min(a.speed, b.speed * std::max(0.f, dot(fwdOf(b.yaw), fa))); a.brake = true; }
+            if (!b.alive || b.mode == CMODE_HELPER || b.mode == CMODE_GONE) continue;
+            for (int k = 0; k < (b.trailer ? 2 : 1); k++) {
+                V3 bp = k == 0 ? b.pos : b.tpos; float byaw = k == 0 ? b.yaw : b.tyaw;
+                float bhl = k == 0 ? b.halfL : CM[MD_TRAILER].halfL, bhw = k == 0 ? b.halfW : CM[MD_TRAILER].halfW;
+                V3 d = bp - a.pos; float dl = len(d);
+                if (dl > a.halfL + bhl + probe + 2.0f) continue;
+                if (dot(d, fa) <= 0.3f) continue;          // сзади или вровень — не наша забота
+                if (!boxHit(a.pos, a.yaw, a.halfL, a.halfW * 0.95f, probe, bp, byaw, bhl, bhw * 0.95f)) continue;
+                bool touching = boxHit(a.pos, a.yaw, a.halfL, a.halfW * 0.95f, 0.15f, bp, byaw, bhl, bhw * 0.95f);
+                if (!touching && k == 0 && dot(fwdOf(b.yaw), fa) < 0.5f) {
+                    // встречное упирание: проверить, видит ли b нас своим щупом
+                    float pb = 0.5f + b.speed * 0.25f;
+                    V3 db = a.pos - b.pos;
+                    if (dot(db, fwdOf(b.yaw)) > 0.3f && boxHit(b.pos, b.yaw, b.halfL, b.halfW * 0.95f, pb, a.pos, a.yaw, a.halfL, a.halfW * 0.95f)) {
+                        float aheadA = dot(d, fa) / std::max(dl, 0.1f), aheadB = dot(db, fwdOf(b.yaw)) / std::max(dl, 0.1f);
+                        bool aYields = aheadA > aheadB + 0.02f || (fabsf(aheadA - aheadB) <= 0.02f && a.id > b.id);
+                        if (!aYields) continue;               // проезжаем первыми, пока не коснулись
+                    }
+                }
+                float vb = k == 0 ? b.speed * std::max(0.f, dot(fwdOf(byaw), fa)) : 0;
+                if (touching) vb = 0;
+                a.speed = std::min(a.speed, vb); a.brake = true;
+                a.holdV = a.holdV < 0 ? vb : std::min(a.holdV, vb);
+            }
         }
     }
     if (spawn) {
@@ -38831,10 +38910,11 @@ static void startShift() {
     updateLighting(fmodf(gHour, 24), SHF.weather);
     updateCamera(0, true);
     // начальный трафик
-    for (int i = 0; i < 26; i++) spawnTrafficCar(PL.pos, 40, 380, false);
+    gClockMin = SHF.minutes;
+    { int n0 = (int)clampf(24 * trafficLevelAt(PL.pos), 8, 40); for (int i = 0; i < n0; i++) spawnTrafficCar(PL.pos, 40, 380, false); }
     platePixels(2, "А0166", 66, true); platePixels(3, "А0266", 66, true);
     gScreen = SC_DRIVE;
-    toast(fmt("СМЕНА НАЧАЛАСЬ. УЧАСТОК: %s", DISTRICT_NAMES[SHF.district]), 0, 4);
+    toast(fmt("СМЕНА НАЧАЛАСЬ. УЧАСТОК: %s. ТРАФИК %s — ДОХОД X%.2f", DISTRICT_NAMES[SHF.district], trafficName(trafficLevelAt(PL.pos)), payMulAt(PL.pos)), 0, 5);
     if (SHF.tutorial) toast("ПОДСКАЗКА: НАЙДИ НАРУШИТЕЛЯ РАДАРОМ, ВКЛЮЧИ МИГАЛКУ И НАЖМИ «ТРЕБОВАТЬ»", 3, 7);
     sfx(SFX_RADIO, 0.6f, 0, 0, 1.2f);
 }
@@ -38863,7 +38943,6 @@ static void endShift() {
 // ---------------------------------------------------------------------
 static float gRadarSpeed = -1; static int gRadarCar = -1; static float gRadarLimit = 60;
 static float gDemandCooldown = 0; static float gHelpCooldown = 0, gBlockCooldown = 0; static bool gHelpUsed = false, gBlockUsed = false;
-static int gAmmo = 0; static float gShotCd = 0, gMuzzleT = 0;
 static float gChaseFarT = 0; static float gCrashRepCd = 0; static float gTutHintT = 0;
 static std::string gSubtitle; static float gSubtitleT = 0;
 
@@ -38935,7 +39014,7 @@ static void demandStop() {
 static void startChase(int idx) {
     AICar& c = CARS[idx];
     c.mode = CMODE_FLEE; c.modeT = 0; c.pressure = 0; c.trail.clear(); c.blink = 0; c.latTarget = 0;
-    gChaseCar = idx; gChaseFarT = 0; gHelpUsed = false; gBlockUsed = false; gHelpCooldown = 0; gBlockCooldown = 0; gAmmo = 8;
+    gChaseCar = idx; gChaseFarT = 0; gHelpUsed = false; gBlockUsed = false; gHelpCooldown = 0; gBlockCooldown = 0;
     SHF.chases++; SV.totalChases++;
     if (c.wanted || (c.caseIdx >= 0 && CASES[c.caseIdx].wanted)) toast("УГНАННАЯ МАШИНА УХОДИТ! ПОГОНЯ! БЛОКПОСТ РАЗРЕШЁН.", 2, 4);
     else if (c.racer) toast("СТРИТРЕЙСЕР УХОДИТ! ПОГОНЯ! БЛОКПОСТ РАЗРЕШЁН.", 2, 4);
@@ -38979,49 +39058,6 @@ static void requestHelp() {
     gHelpUsed = true;
     toast("РАЦИЯ: ЭКИПАЖ 2-14 ПОДКЛЮЧИЛСЯ К ПРЕСЛЕДОВАНИЮ!", 3, 4);
     sfx(SFX_RADIO, 0.7f, 0, 0, 1.4f);
-}
-// стрельба по колёсам: беглец впереди, не дальше 45 м и в секторе ±25°
-static bool shotInZone(float* outD = nullptr) {
-    if (gChaseCar < 0 || gChaseCar >= (int)CARS.size()) return false;
-    const AICar& c = CARS[gChaseCar];
-    V3 d = c.pos - PL.pos; float along = dot(d, fwdOf(PL.yaw)), lat = dot(d, rightOf(PL.yaw));
-    float dd = sqrtf(along * along + lat * lat);
-    if (outD) *outD = dd;
-    return along > 4 && dd < 45 && fabsf(lat) < along * 0.47f;
-}
-static void shootTires() {
-    if (gChaseCar < 0 || gAmmo <= 0 || gShotCd > 0) return;
-    gAmmo--; gShotCd = 0.55f; gMuzzleT = 0.09f;
-    sfx(SFX_SHOT, 1.0f);
-    AICar& c = CARS[gChaseCar];
-    float d = 99;
-    bool zone = shotInZone(&d);
-    float p = zone ? clampf(0.9f - (d - 6) / 55, 0.2f, 0.9f) : 0;
-    if (fabsf(PL.speed - c.speed) > 8) p *= 0.8f;
-    if (L.rain > 0.5f) p *= 0.85f;
-    if (PL.offroad) p *= 0.7f;
-    const CarModel& M = CM[c.model];
-    int free[8], nfree = 0;
-    for (size_t wi = 0; wi < M.wheels.size() && wi < 8; wi++) if (!((c.flatMask >> wi) & 1)) free[nfree++] = (int)wi;
-    if (zone && nfree > 0 && grng.f() < p) {
-        // чаще попадают в задние колёса — они ближе
-        int pick = free[grng.i(nfree)];
-        for (int k = 0; k < nfree; k++) if (M.wheels[free[k]].p.z < 0 && grng.chance(0.6f)) { pick = free[k]; break; }
-        c.flatMask |= 1 << pick;
-        Mat3 rot = rotYPR(c.yaw, 0, 0); V3 wp = mul(rot, M.wheels[pick].p) + c.pos;
-        for (int k = 0; k < 14; k++) emitPart(wp, V3(grng.range(-3, 3), grng.range(1, 4), grng.range(-3, 3)), grng.range(0.2f, 0.4f), 0.12f, Col(1, 0.8f, 0.35f), 1, 0, true);
-        for (int k = 0; k < 4; k++) emitPart(wp + V3(0, 0.2f, 0), V3(grng.range(-0.5f, 0.5f), 0.8f, grng.range(-0.5f, 0.5f)), 1.5f, 0.5f, Col(0.75f, 0.75f, 0.75f), 0.45f, 1.2f);
-        c.pressure += 1.2f;
-        int nf = bitCount(c.flatMask);
-        toast(nf >= 2 ? "ПОПАДАНИЕ! БЕГЛЕЦ ТЕРЯЕТ ХОД" : "ПОПАДАНИЕ! КОЛЕСО ПРОБИТО", 1, 2);
-    } else {
-        toast(zone ? "ПРОМАХ" : "ПРОМАХ: БЕГЛЕЦ ВНЕ ЗОНЫ ОГНЯ", 2, 1.5f);
-        // промах в городе рядом с пешеходами — нарушение правил применения оружия
-        bool peds = false;
-        for (const Ped& q : PEDS) if (q.alive && dist2d(q.pos, c.pos) < 25) { peds = true; break; }
-        if (districtAt(PL.pos) == 0 && peds) { addRep(-3); toast("ОПАСНАЯ СТРЕЛЬБА РЯДОМ С ЛЮДЬМИ! -3 РЕПУТАЦИИ", 2, 3); }
-    }
-    if (gAmmo == 0) toast("ПАТРОНЫ КОНЧИЛИСЬ", 3, 2);
 }
 // блокпост выставляют только для угнанных/разыскиваемых машин и стритрейсеров
 static bool roadblockAllowed() {
@@ -39139,6 +39175,10 @@ static void finishInspection(int verdict, bool* arts, std::string& outTitle, std
         std::string a = "СТАТЬИ:"; for (int i = 0; i < ART_N; i++) if (c.needArt[i]) a += std::string(" ") + ART_SHORT[i];
         outLines.push_back(a);
     }
+    if (moneyD > 0) {   // надбавка за плотность трафика в зоне
+        float pm = payMulAt(PL.pos);
+        if (fabsf(pm - 1) > 0.01f) { int add = (int)(moneyD * (pm - 1)); moneyD += add; outLines.push_back(fmt("%s ЗА ТРАФИК (X%.2f): %+d ₽", pm > 1 ? "НАДБАВКА" : "ПОНИЖЕНИЕ", pm, add)); }
+    }
     SV.money = std::max(0, SV.money + moneyD); addRep(repD);
     if (good) sfx(SFX_COIN); else sfx(SFX_ERROR);
     // судьба машины
@@ -39156,6 +39196,16 @@ static void finishInspection(int verdict, bool* arts, std::string& outTitle, std
 static Input gIn;
 static void updateDrive(float dt) {
     SHF.minutes += dt * (40.0f / 60.0f);
+    gClockMin = SHF.minutes;
+    {   // сообщить о смене зоны или наступлении/окончании часа пик
+        static int lastD = -1; static int lastCls = -1;
+        if (SHF.minutes < SHF.startMin + 1.0f) lastD = -1;   // начало смены — об этом уже сказано при заступлении
+        int dd = districtAt(PL.pos); float lv = trafficLevelAt(PL.pos);
+        int cls = lv < 0.55f ? 0 : (lv < 0.9f ? 1 : (lv < 1.3f ? 2 : 3));
+        if (lastD >= 0 && (dd != lastD || cls != lastCls))
+            toast(fmt("%s: ТРАФИК %s — ДОХОД X%.2f", DISTRICT_NAMES[dd], trafficName(lv), payMulAt(PL.pos)), 3, 3.5f);
+        lastD = dd; lastCls = cls;
+    }
     gHour = fmodf(SHF.minutes / 60.0f, 24);
     updateLighting(gHour, SHF.weather);
     gWorldTime += dt;
@@ -39168,8 +39218,6 @@ static void updateDrive(float dt) {
     updateAccident(dt);
     pickTarget();
     if (gDemandCooldown > 0) gDemandCooldown -= dt;
-    if (gShotCd > 0) gShotCd -= dt;
-    if (gMuzzleT > 0) gMuzzleT -= dt;
     if (gCrashRepCd > 0) gCrashRepCd -= dt;
     if (gSubtitleT > 0) gSubtitleT -= dt;
     for (size_t i = 0; i < TOASTS.size();) { TOASTS[i].t -= dt; if (TOASTS[i].t <= 0) TOASTS.erase(TOASTS.begin() + i); else i++; }
@@ -39218,7 +39266,7 @@ static void updateDrive(float dt) {
     while (SHF.minutes - SHF.lastCamMin >= 1.0f) {
         SHF.lastCamMin += 1.0f;
         int inc = 0;
-        for (const Camera_& cam : SPEEDCAMS) inc += EDGES[cam.edge].highway ? 12 : 8;
+        for (const Camera_& cam : SPEEDCAMS) { const Edge& ce = EDGES[cam.edge]; V3 cp = ce.pa + ce.dir * cam.s; inc += (int)roundf((ce.highway ? 12 : 8) * payMulAt(cp)); }
         if (inc > 0) { SHF.camIncome += inc; SV.money += inc; }
     }
     // подсказки обучения
@@ -39369,6 +39417,16 @@ static void drawDriveHUD() {
         const Task& t = SHF.tasks[i];
         UI.text(tx + u * 5, mt + u * (4 + i * 10), taskText(t), u * 0.9f, t.done ? RGBA(110, 220, 120) : C_WHITE);
     }
+    // трафик в зоне и множитель дохода
+    {
+        float lv = trafficLevelAt(PL.pos), pm = payMulAt(PL.pos);
+        SDL_Color tc = lv < 0.55f ? RGBA(150, 160, 175) : (lv < 0.9f ? RGBA(120, 220, 140) : (lv < 1.3f ? RGBA(255, 210, 80) : RGBA(255, 120, 80)));
+        // под мини-картой, чтобы не мешать сообщениям
+        float cy = mt + ph + u * 4 + u * 74 + u * 4, cw2 = u * 74;
+        UI.roundRect(mx, cy, cw2, u * 20, u * 2, RGBA(18, 26, 40, 170));
+        UI.text(mx + cw2 / 2, cy + u * 2.5f, fmt("ТРАФИК: %s", trafficName(lv)).c_str(), u * 0.75f, tc, 1);
+        UI.text(mx + cw2 / 2, cy + u * 11, fmt("ДОХОД X%.2f", pm).c_str(), u * 0.85f, pm >= 1 ? RGBA(255, 220, 90) : RGBA(170, 180, 190), 1);
+    }
     // кнопки справа сверху
     float bs = u * 30;
     float bx = SW - mx - bs;
@@ -39475,39 +39533,12 @@ static void drawDriveHUD() {
     {
         float hw = ab * 0.8f, hx = ax - 2 * (ab + b * 0.12f) + (ab - hw);
         SDL_Color hc = gHornT > 0 ? RGBA(230, 230, 240) : RGBA(80, 90, 110);
-        if (button(hx, ay + ab * 0.1f, hw, ab * 0.6f, "БИП", hc, u * 0.85f) && gHornT <= 0.1f) { sfx(SFX_HORN, 0.8f, 0, 0, 0.45f); gHornT = 0.5f; }
+        if (button(hx, ay + ab * 0.1f, hw, ab * 0.6f, "КРЯК", hc, u * 0.85f) && gHornT <= 0.15f) { sfx(SFX_QUACK, 0.9f); gHornT = 0.5f; }
     }
     if (gChaseCar >= 0) {
         float ry = ay - ab * 0.8f - b * 0.1f;
         if (button(ax, ry, ab, ab * 0.7f, "ПОМОЩЬ", C_BLUE, u * 0.85f, !gHelpUsed)) requestHelp();
-        {
-            bool zone = shotInZone();
-            bool en = gAmmo > 0 && gShotCd <= 0;
-            std::string lbl = fmt("ОГОНЬ %d", gAmmo);
-            if (button(ax - 2 * (ab + b * 0.12f), ry, ab, ab * 0.7f, lbl.c_str(), en ? (zone ? RGBA(190, 40, 30) : RGBA(110, 60, 55)) : RGBA(70, 70, 70), u * 0.85f, en)) shootTires();
-        }
         if (button(ax - ab - b * 0.12f, ry, ab, ab * 0.7f, "БЛОКПОСТ", roadblockAllowed() ? C_BLUE : RGBA(70, 70, 70), u * 0.85f, !gBlockUsed && roadblockAllowed())) requestRoadblock();
-    }
-    // прицел на колёсах беглеца и вспышка выстрела
-    if (gChaseCar >= 0 && shotInZone()) {
-        const AICar& c = CARS[gChaseCar]; const CarModel& M = CM[c.model];
-        float rz = M.wheels.size() > 2 ? M.wheels[2].p.z : M.minZ * 0.6f;
-        V3 tp = c.pos + fwdOf(c.yaw) * rz + V3(0, 0.35f, 0);
-        float sx, sy, sz;
-        if (R3.project(tp, sx, sy, sz)) {
-            float rr = clampf(u * 260 / std::max(sz, 4.f), u * 6, u * 26);
-            SDL_Color rc = RGBA(255, 60, 40, 220);
-            UI.ring(sx, sy, rr * 0.85f, rr, rc, 28);
-            UI.rect(sx - rr * 1.3f, sy - u * 0.5f, rr * 0.8f, u, rc); UI.rect(sx + rr * 0.5f, sy - u * 0.5f, rr * 0.8f, u, rc);
-            UI.rect(sx - u * 0.5f, sy - rr * 1.3f, u, rr * 0.8f, rc); UI.rect(sx - u * 0.5f, sy + rr * 0.5f, u, rr * 0.8f, rc);
-        }
-    }
-    if (gMuzzleT > 0) {
-        float fx = gCamMode == 1 ? SW * 0.86f : SW * 0.5f - u * 30, fy = gCamMode == 1 ? SH * 0.5f : SH * 0.5f;
-        if (gCamMode != 1) { float sx, sy, sz; V3 mp = PL.pos + fwdOf(PL.yaw) * 0.6f - rightOf(PL.yaw) * (CM[PATROL[SV.car].model].halfW + 0.2f) + V3(0, 1.25f, 0); if (R3.project(mp, sx, sy, sz)) { fx = sx; fy = sy; } }
-        UI.glow(fx, fy, u * 34, RGBA(255, 210, 120, 255));
-        UI.glow(fx, fy, u * 14, RGBA(255, 255, 230, 255));
-        UI.rect(0, 0, SW, SH, RGBA(255, 230, 180, 26));
     }
     // вызов на ДТП: метка, указатель, кнопка оформления
     if (ACC.active) {
@@ -40182,6 +40213,7 @@ static void finishAccident() {
         else { rep -= 4; money -= 300; gResLines.push_back("- НЕ ВЫЗВАНА СКОРАЯ ДЛЯ ПОСТРАДАВШЕГО!"); }
     }
     if (late > 0.01f) gResLines.push_back(fmt("ОПОЗДАНИЕ: НАГРАДА МЕНЬШЕ НА %d%%", (int)(late * 60)));
+    if (money > 0) { float pm = payMulAt(ACC.pos); if (fabsf(pm - 1) > 0.01f) { int add = (int)(money * (pm - 1)); money += add; gResLines.push_back(fmt("%s ЗА ТРАФИК (X%.2f): %+d ₽", pm > 1 ? "+ НАДБАВКА" : "- ПОНИЖЕНИЕ", pm, add)); } }
     gResMoney = money; gResRep = rep;
     SV.money = std::max(0, SV.money + money); addRep(rep);
     if (gResGood) { SHF.correct++; SV.totalCorrect++; sfx(SFX_COIN); taskProgress(T_ACCIDENT); } else { SHF.wrong++; SV.totalWrong++; sfx(SFX_ERROR); }
@@ -40478,7 +40510,9 @@ static void drawShiftStart(float dt) {
     UI.text(rx, ry, "УЧАСТОК ПАТРУЛИРОВАНИЯ", u * 1.0f, RGBA(150, 200, 255)); ry += u * 11;
     for (int d = 0; d < 4; d++) {
         bool ok = rankOf(SV.rep) >= DISTRICT_RANK[d];
-        std::string l = ok ? DISTRICT_NAMES[d] : std::string(DISTRICT_NAMES[d]) + " (С ЗВАНИЯ " + RANKS[DISTRICT_RANK[d]] + ")";
+        float lv0 = DISTRICT_TRAFFIC[d] * hourTraffic(gPlannedNight ? 20 * 60 + 30 : 8 * 60 + 30);
+        float pm0 = clampf(roundf((0.5f + 0.62f * lv0) * 20) / 20, 0.75f, 1.8f);
+        std::string l = ok ? fmt("%s — ТРАФИК %s, ДОХОД X%.2f", DISTRICT_NAMES[d], trafficName(lv0), pm0) : std::string(DISTRICT_NAMES[d]) + " (С ЗВАНИЯ " + RANKS[DISTRICT_RANK[d]] + ")";
         if (button(rx, ry, rw, u * 21, l.c_str(), gPlannedDistrict == d ? C_BLUE : C_GRAY, u * 0.95f, ok)) gPlannedDistrict = d;
         ry += u * 25;
     }
@@ -40631,9 +40665,9 @@ static void drawHelp() {
         "ОТПУСТИТЬ: ВСЁ В ПОРЯДКЕ. СОБСТВЕННИК В СТС МОЖЕТ БЫТЬ ДРУГИМ — ЭТО НЕ НАРУШЕНИЕ.";
     const char* right =
         "УПРАВЛЕНИЕ: СЛЕВА — РУЛЬ, СПРАВА — ГАЗ И ТОРМОЗ (ДОЛГО ДЕРЖАТЬ ТОРМОЗ = ЗАДНИЙ ХОД). МОЖНО ЖАТЬ ОДНОВРЕМЕННО.\n"
-        "МИГАЛКА ВКЛЮЧАЕТ СВЕТ И СИРЕНУ — МАШИНЫ УСТУПАЮТ ДОРОГУ И ЧАЩЕ ПОДЧИНЯЮТСЯ. «БИП» — ГУДОК: МАШИНА ВПЕРЕДИ ПРИБАВИТ ИЛИ УЙДЁТ ВПРАВО.\n"
+        "МИГАЛКА ВКЛЮЧАЕТ СВЕТ И СИРЕНУ — МАШИНЫ УСТУПАЮТ ДОРОГУ И ЧАЩЕ ПОДЧИНЯЮТСЯ. «КРЯК» — КРЯКАЛКА СГУ: МАШИНА ВПЕРЕДИ УЙДЁТ ВПРАВО И ПРОПУСТИТ. ДОХОД ЗАВИСИТ ОТ ТРАФИКА В ЗОНЕ: ЧЕМ ПЛОТНЕЕ ПОТОК (ЧАС ПИК, ЗАПАДНАЯ ТРАССА), ТЕМ БОЛЬШЕ ПЛАТЯТ.\n"
         "ТРЕБОВАТЬ (НА ХОДУ) ИЛИ ЖЕЗЛ (СТОЯ) — ОСТАНОВИТЬ МАШИНУ В ЖЁЛТОЙ РАМКЕ. РАДАР ПОКАЗЫВАЕТ СКОРОСТЬ МАШИНЫ ВПЕРЕДИ.\n"
-        "ПОГОНЯ: ДЕРЖИСЬ БЛИЖЕ И ТОЛКАЙ БЕГЛЕЦА, ПОКА НЕ ЗАПОЛНИТСЯ ШКАЛА. «ОГОНЬ» — СТРЕЛЬБА ПО КОЛЁСАМ (8 ПАТРОНОВ), КОГДА БЕГЛЕЦ ВПЕРЕДИ В КРАСНОМ ПРИЦЕЛЕ; ДВА ПРОБИТЫХ КОЛЕСА — И ОН ВСТАНЕТ. НЕ ПРОМАХИВАЙСЯ РЯДОМ С ЛЮДЬМИ. ВЫЗОВИ ПОМОЩЬ. БЛОКПОСТ — ТОЛЬКО ДЛЯ МАШИН В РОЗЫСКЕ И СТРИТРЕЙСЕРОВ. ОТСТАНЕШЬ — ПРОВАЛ.\n"
+        "ПОГОНЯ: ДЕРЖИСЬ БЛИЖЕ И ТОЛКАЙ БЕГЛЕЦА, ПОКА НЕ ЗАПОЛНИТСЯ ШКАЛА. ВЫЗОВИ ПОМОЩЬ. БЛОКПОСТ — ТОЛЬКО ДЛЯ МАШИН В РОЗЫСКЕ И СТРИТРЕЙСЕРОВ. ОТСТАНЕШЬ — ПРОВАЛ.\n"
         "ДТП: ЕДЬ ПО СТРЕЛКЕ, ОСТАНОВИСЬ У МЕСТА И ОФОРМИ. ВИНОВНИК: ВЪЕХАЛ СЗАДИ — 12.15, ПЕРЕСТРОИЛСЯ В ДРУГУЮ МАШИНУ — 12.14, НЕ ПРОПУСТИЛ МАШИНУ СПРАВА БЕЗ СВЕТОФОРА — 12.13, ПРОЕХАЛ НА КРАСНЫЙ — 12.12. ПРОВЕРЯЙ АЛКОТЕСТЕРОМ, ВЫЗЫВАЙ СКОРУЮ.\n"
         "ПРИДИРКИ К ЧЕСТНЫМ ВОДИТЕЛЯМ ВЕДУТ К ЖАЛОБАМ И ШТРАФАМ. ЗВАНИЯ ОТКРЫВАЮТ НОВЫЕ УЧАСТКИ И МАШИНЫ.";
     UI.textBox(mx, mt + u * 22, colW, left, u * 0.95f, C_LIGHT);
@@ -40696,8 +40730,7 @@ static void handleEvent(const SDL_Event& e) {
                 if (e.key.keysym.sym == SDLK_f) { PL.flash = !PL.flash; PL.siren = PL.flash; }
                 if (e.key.keysym.sym == SDLK_e) demandStop();
                 if (e.key.keysym.sym == SDLK_c) { gCamMode = 1 - gCamMode; updateCamera(0, true); }
-                if (e.key.keysym.sym == SDLK_f) shootTires();
-                if (e.key.keysym.sym == SDLK_h) { sfx(SFX_HORN, 0.8f, 0, 0, 0.45f); gHornT = 0.5f; }
+                if (e.key.keysym.sym == SDLK_h) { sfx(SFX_QUACK, 0.9f); gHornT = 0.5f; }
             }
             break;
         case SDL_KEYUP: gKeys[e.key.keysym.scancode] = false; break;
