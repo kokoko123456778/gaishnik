@@ -48082,9 +48082,9 @@ static std::vector<Edge> EDGES;
 static const char* DISTRICT_NAMES[4] = {"ГОРОД", "ВОСТОЧНАЯ ТРАССА", "СЕВЕРНАЯ ТРАССА", "ЗАПАДНАЯ ТРАССА"};
 static const int DISTRICT_RANK[4] = {0, 1, 3, 5};
 static int districtAt(const V3& p) {
-    if (p.x > -60 && p.x < 390 && p.z > -60 && p.z < 390) return 0;
+    if (p.x > -60 && p.x < 610 && p.z > -60 && p.z < 610) return 0;
     if (p.z >= 700) return 2;
-    if (p.x >= 390) return 1;
+    if (p.x >= 610) return 1;
     return 3;
 }
 
@@ -48119,17 +48119,21 @@ static void finalizeRoads() {
     }
 }
 
-static int CITY_N[4][4];
+// город 5×5 кварталов (6×6 перекрёстков, шаг 110 м); ряд j = CITY_AVE — проспект (по 2 полосы в каждую сторону),
+// с обоих концов переходит в трассы
+static const int CITY_GN = 6, CITY_AVE = 2;
+static const float CITY_STEP = 110;
+static int CITY_N[CITY_GN][CITY_GN];
 static void buildRoads() {
-    for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) CITY_N[i][j] = addNode(i * 110.f, j * 110.f, true);
-    for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {
-        if (i < 3) addEdge(CITY_N[i][j], CITY_N[i + 1][j], 1, 60, false);
-        if (j < 3) addEdge(CITY_N[i][j], CITY_N[i][j + 1], 1, 60, false);
+    for (int i = 0; i < CITY_GN; i++) for (int j = 0; j < CITY_GN; j++) CITY_N[i][j] = addNode(i * CITY_STEP, j * CITY_STEP, true);
+    for (int i = 0; i < CITY_GN; i++) for (int j = 0; j < CITY_GN; j++) {
+        if (i < CITY_GN - 1) addEdge(CITY_N[i][j], CITY_N[i + 1][j], j == CITY_AVE ? 2 : 1, 60, false);
+        if (j < CITY_GN - 1) addEdge(CITY_N[i][j], CITY_N[i][j + 1], 1, 60, false);
     }
-    int HA = addNode(800, 110, false), HB = addNode(800, 1400, false), HC = addNode(-700, 1400, false);
-    int HF = addNode(-700, 220, false), HD = addNode(-700, -900, false), HE = addNode(800, -900, false);
-    addEdge(CITY_N[3][1], HA, 2, 70, true);
-    addEdge(HF, CITY_N[0][2], 2, 70, true);
+    int HA = addNode(800, CITY_AVE * CITY_STEP, false), HB = addNode(800, 1400, false), HC = addNode(-700, 1400, false);
+    int HF = addNode(-700, CITY_AVE * CITY_STEP, false), HD = addNode(-700, -900, false), HE = addNode(800, -900, false);
+    addEdge(CITY_N[CITY_GN - 1][CITY_AVE], HA, 2, 70, true);
+    addEdge(HF, CITY_N[0][CITY_AVE], 2, 70, true);
     addEdge(HA, HB, 2, 90, true); addEdge(HB, HC, 2, 90, true); addEdge(HC, HF, 2, 90, true);
     addEdge(HF, HD, 2, 90, true); addEdge(HD, HE, 2, 90, true); addEdge(HE, HA, 2, 90, true);
     finalizeRoads();
@@ -48153,7 +48157,7 @@ static inline int edgeEndNode(const Edge& e, int dir) { return dir == 0 ? e.b : 
 // Площадка: lx (поперёк дороги, наружу) от -hw до hw, lz (вдоль движения) от -hl до hl.
 // Как на российских трассах: полоса торможения перед въездом, разделительный газон вдоль дороги,
 // въезд и выезд на концах площадки, полоса разгона после выезда.
-struct FuelStation { int edge = 0, dir = 0; float s = 0; V3 c, f, r; float yaw = 0; float hw = 14, hl = 32; uint32_t seed = 0; };
+struct FuelStation { int edge = 0, dir = 0; float s = 0; V3 c, f, r; float yaw = 0; float hw = 14, hl = 32; uint32_t seed = 0; bool city = false; };   // city — городская, въезд прямо с улицы через тротуар
 static const float FUEL_LANE = 75;       // длина полосы торможения/разгона (с отгоном 30 м)
 static const float FUEL_THROAT = 12;     // ширина въезда/выезда вдоль дороги
 static std::vector<FuelStation> FUELS;
@@ -48163,13 +48167,15 @@ static inline void fuelLocal(const FuelStation& F, const V3& p, float& lx, float
 static int fuelZone(const V3& p, float margin) {
     for (size_t i = 0; i < FUELS.size(); i++) {
         float lx, lz; fuelLocal(FUELS[i], p, lx, lz);
-        if (lx > -FUELS[i].hw - 3.5f - margin && lx < FUELS[i].hw + margin && fabsf(lz) < FUELS[i].hl + FUEL_LANE + margin) return (int)i;
+        float ln = FUELS[i].city ? 0 : FUEL_LANE;
+        if (lx > -FUELS[i].hw - 3.5f - margin && lx < FUELS[i].hw + margin && fabsf(lz) < FUELS[i].hl + ln + margin) return (int)i;
     }
     return -1;
 }
 // на полосе торможения/разгона (вдоль трассы)?
 static bool fuelLaneAt(const V3& p) {
     for (const FuelStation& F : FUELS) {
+        if (F.city) continue;
         float lx, lz; fuelLocal(F, p, lx, lz);
         if (lx > -F.hw - 3.2f && lx < -F.hw + 0.6f && fabsf(lz) < F.hl + FUEL_LANE) return true;
     }
@@ -48269,6 +48275,8 @@ struct SObj {
     int ival; std::string text; bool collide;
 };
 static std::vector<SObj> OBJS;
+struct ParkRect { float x0, x1, z0, z1; };
+static std::vector<ParkRect> PARKS;   // парки — рисуются аллеи
 static const float GRID_X0 = -900, GRID_Z0 = -1100, GRID_CS = 60;
 static const int GRID_NX = 46, GRID_NZ = 48;
 static std::vector<int> GRID[GRID_NX * GRID_NZ];
@@ -48286,6 +48294,13 @@ static void addObj(const SObj& o) {
         if (g >= 0 && (GRID[g].empty() || GRID[g].back() != id)) GRID[g].push_back(id);
     }
 }
+static bool overlapsBuilding(const V3& p, float rad) {
+    for (const SObj& o : OBJS) {
+        if (o.type != OB_BUILDING) continue;
+        if (fabsf(p.x - o.p.x) < o.h.x + rad && fabsf(p.z - o.p.z) < o.h.z + rad) return true;
+    }
+    return false;
+}
 static bool pointNearRoad(const V3& p, float margin) {
     for (const Edge& e : EDGES) {
         float s = dot(p - e.pa, e.dir); float sc = clampf(s, -NODES[e.a].trim, e.slen + NODES[e.b].trim);
@@ -48301,10 +48316,20 @@ static Post POSTS[4];
 struct Billboard { const char* text; };
 static const char* BILLBOARD_TEXTS[] = {"ПРИСТЕГНИСЬ!", "НЕ ГОНИ!", "СОБЛЮДАЙ ДИСТАНЦИЮ", "ПЕШЕХОД ВСЕГДА ПРАВ", "ВЕДЁТСЯ ФОТОФИКСАЦИЯ", "ГИБДД: ТЕЛ. 112", "СКОРОСТЬ УБИВАЕТ"};
 
+// районы города по кварталам (i — по X, j — по Z)
+enum { CB_LIVING, CB_CENTER, CB_INDUSTRY, CB_PARK, CB_FUEL };
+static int cityBlockKind(int i, int j) {
+    if (i == 4 && j == CITY_AVE) return CB_FUEL;
+    if ((i == 2 && j == 3) || (i == 0 && j == 1)) return CB_PARK;
+    if ((i == 4 && j <= 1) || (i == 3 && j == 0)) return CB_INDUSTRY;
+    if (i >= 1 && i <= 3 && (j == 1 || j == 2)) return CB_CENTER;
+    return CB_LIVING;
+}
 static void buildFuelStations(Rng& r) {
     FUELS.clear();
+    std::vector<FuelStation> cand;
     int k = 0;
-    for (size_t ei = 0; ei < EDGES.size() && FUELS.size() < 7; ei++) {
+    for (size_t ei = 0; ei < EDGES.size() && cand.size() < 7; ei++) {
         const Edge& e = EDGES[ei];
         if (!e.highway || e.slen < 600) continue;
         FuelStation F; F.edge = (int)ei; F.dir = k & 1; k++;
@@ -48315,18 +48340,34 @@ static void buildFuelStations(Rng& r) {
             F.c = st + F.f * F.s + F.r * (e.halfW + 3.0f + F.hw);
             bool bad = false;
             for (int q = 0; q < 4; q++) if (dist2d(F.c, POSTS[q].pos) < 200) bad = true;
-            for (const FuelStation& G : FUELS) if (dist2d(F.c, G.c) < 450) bad = true;
+            for (const FuelStation& G : cand) if (dist2d(F.c, G.c) < 450) bad = true;
             if (F.s < F.hl + FUEL_LANE + 40 || F.s > e.slen - F.hl - FUEL_LANE - 40) bad = true;
             if (!bad) { ok = true; break; }
         }
         if (!ok) continue;
+        cand.push_back(F);
+    }
+    // городская АЗС — на проспекте у восточного выезда, справа по ходу в город
+    {
+        int ea = CITY_N[CITY_GN - 2][CITY_AVE], eb = CITY_N[CITY_GN - 1][CITY_AVE];
+        for (size_t ei = 0; ei < EDGES.size(); ei++) {
+            const Edge& e = EDGES[ei];
+            if (!((e.a == ea && e.b == eb) || (e.a == eb && e.b == ea))) continue;
+            FuelStation F; F.edge = (int)ei; F.dir = e.a == ea ? 1 : 0; F.city = true; F.hw = 13; F.hl = 30;
+            V3 st; laneFrame(e, F.dir, st, F.f, F.r, F.yaw);
+            F.s = e.slen * 0.5f;
+            F.c = st + F.f * F.s + F.r * (e.halfW + e.sidewalk + F.hw);
+            cand.push_back(F);
+        }
+    }
+    for (FuelStation F : cand) {
         F.seed = r.next();
         FUELS.push_back(F);
         // убрать деревья, щиты и прочее с площадки
         for (SObj& o : OBJS) {
             V3 d = o.p - F.c; float lx = dot(d, F.r), lz = dot(d, F.f);
             if (lx > -F.hw - 3.5f && lx < F.hw + 9 && fabsf(lz) < F.hl + 9) { o.type = OB_NONE; o.collide = false; }
-            if (lx > -F.hw - 3.5f && lx < -F.hw + 6 && fabsf(lz) < F.hl + FUEL_LANE + 5) { o.type = OB_NONE; o.collide = false; }   // полосы
+            if (!F.city && lx > -F.hw - 3.5f && lx < -F.hw + 6 && fabsf(lz) < F.hl + FUEL_LANE + 5) { o.type = OB_NONE; o.collide = false; }   // полосы
         }
         int id = (int)FUELS.size() - 1;
         auto P = [&](float lx, float lz) { return F.c + F.r * lx + F.f * lz; };
@@ -48340,7 +48381,7 @@ static void buildFuelStations(Rng& r) {
         pole(P(-F.hw + 2.0f, -F.hl + FUEL_THROAT + 5), 0.7f);  // стела с ценами (на газоне у въезда)
         box(P(-F.hw + 2.0f, 0), 1.5f, F.hl - FUEL_THROAT, F.yaw);   // разделительный газон с бордюром
         // дорожные знаки 7.3 «АЗС»: за 500 и 150 м и у начала полосы торможения
-        for (int k = 0; k < 3; k++) {
+        for (int k = 0; k < 3 && !F.city; k++) {
             static const float dz[3] = {500, 150, 0}; static const int lab[3] = {500, 150, 0};
             if (F.s - F.hl - FUEL_LANE - dz[k] < 40) continue;   // знак не дальше начала участка трассы
             SObj g; g.type = OB_FSIGN; g.p = P(-F.hw + 1.0f, -F.hl - FUEL_LANE - dz[k]); g.yaw = F.yaw; g.h = V3(0, 3, 0); g.radius = 2; g.collide = true;
@@ -48354,50 +48395,119 @@ static void buildFuelStations(Rng& r) {
 
 static void buildScenery() {
     Rng r(777);
+    PARKS.clear();
     // городские кварталы
-    static const Col facades[] = {hexc(0xd8d2c4), hexc(0xb8b8b4), hexc(0xc9876a), hexc(0xe6dcc0), hexc(0xa9c0d0), hexc(0xd0b090), hexc(0xe8e8e8), hexc(0x9aa59a)};
-    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) {
-        float x0 = i * 110 + 12, x1 = (i + 1) * 110 - 12, z0 = j * 110 + 12, z1 = (j + 1) * 110 - 12;
-        bool park = (i == 1 && j == 1);
-        if (park) {
-            for (int k = 0; k < 26; k++) {
-                SObj t; t.type = OB_TREE; t.p = V3(r.range(x0 + 3, x1 - 3), 0, r.range(z0 + 3, z1 - 3)); t.h = V3(0, r.range(5, 9), 0);
-                t.col = Col(0.2f + r.f() * 0.1f, 0.45f + r.f() * 0.15f, 0.18f); t.radius = 3; t.seed = r.next(); t.collide = true; t.yaw = 0; t.floors = 0; t.ival = 0;
-                addObj(t);
+    static const Col panelCols[] = {hexc(0xe8e8e8), hexc(0xd8d2c4), hexc(0xe6dcc0), hexc(0xc8d0d8), hexc(0xdcc8b4), hexc(0xd8dcd0)};
+    static const Col glassCols[] = {hexc(0x7f9fb8), hexc(0x5d7890), hexc(0xa9c0d0), hexc(0x8a9aa0), hexc(0x6d8a96), hexc(0xb8b8b4)};
+    auto mkBuilding = [&](V3 c, float hx, float hz, int floors, Col col, int ival) {
+        SObj b; b.type = OB_BUILDING; b.p = c; b.yaw = 0; b.floors = floors;
+        b.h = V3(hx, floors * 3.2f, hz); b.col = col; b.col2 = Col(0.35f, 0.33f, 0.32f); b.seed = r.next();
+        b.radius = sqrtf(hx * hx + hz * hz); b.collide = true; b.ival = ival; addObj(b);
+    };
+    // «глухие» коробки: 2 — склад/цех, 4 — бетонный забор, 5 — труба в полоску
+    auto mkPlain = [&](V3 c, float hx, float hz, float H, Col col, int ival) {
+        SObj b; b.type = OB_BUILDING; b.p = c; b.yaw = 0; b.floors = std::max(1, (int)(H / 3.2f));
+        b.h = V3(hx, H, hz); b.col = col; b.col2 = ival == 2 ? Col(0.45f, 0.47f, 0.5f) : col * 0.8f; b.seed = r.next();
+        b.radius = sqrtf(hx * hx + hz * hz); b.collide = true; b.ival = ival; addObj(b);
+    };
+    auto mkTree = [&](V3 p, float hmin, float hmax) {
+        SObj t; t.type = OB_TREE; t.p = p; t.h = V3(0, r.range(hmin, hmax), 0);
+        t.col = Col(0.2f + r.f() * 0.1f, 0.45f + r.f() * 0.15f, 0.18f); t.radius = 3; t.seed = r.next(); t.collide = true; t.yaw = 0; t.floors = 0; t.ival = 0;
+        addObj(t);
+    };
+    auto mkBench = [&](V3 p, float yaw) {
+        SObj b; b.type = OB_BENCH; b.p = p; b.h = V3(0.9f, 0.45f, 0.25f); b.yaw = yaw; b.col = Col(0.5f, 0.32f, 0.18f);
+        b.radius = 1; b.collide = true; b.seed = 0; b.floors = 0; b.ival = 0; addObj(b);
+    };
+    for (int i = 0; i < CITY_GN - 1; i++) for (int j = 0; j < CITY_GN - 1; j++) {
+        // отступ от оси улицы: тротуар + 5 м (у проспекта шире)
+        float x0 = i * CITY_STEP + 12, x1 = (i + 1) * CITY_STEP - 12;
+        float z0 = j * CITY_STEP + (j == CITY_AVE ? 15.5f : 12), z1 = (j + 1) * CITY_STEP - (j + 1 == CITY_AVE ? 15.5f : 12);
+        float mx = (x0 + x1) * 0.5f, mz = (z0 + z1) * 0.5f, hxB = (x1 - x0) * 0.5f, hzB = (z1 - z0) * 0.5f;
+        int kind = cityBlockKind(i, j);
+        if (kind == CB_PARK) {
+            PARKS.push_back({x0, x1, z0, z1});
+            for (int k = 0; k < 48; k++) {
+                V3 p(r.range(x0 + 3, x1 - 3), 0, r.range(z0 + 3, z1 - 3));
+                if (fabsf(p.x - mx) < 3.5f || fabsf(p.z - mz) < 3.5f || (fabsf(p.x - mx) < 9 && fabsf(p.z - mz) < 9)) continue;   // аллеи крестом и площадь
+                mkTree(p, 5, 10);
             }
-            for (int k = 0; k < 6; k++) {
-                SObj b; b.type = OB_BENCH; b.p = V3(x0 + 8 + k * 13, 0, (z0 + z1) * 0.5f + ((k & 1) ? 4 : -4)); b.h = V3(0.9f, 0.45f, 0.25f); b.yaw = 0; b.col = Col(0.5f, 0.32f, 0.18f);
-                b.radius = 1; b.collide = true; b.seed = 0; b.floors = 0; b.ival = 0; addObj(b);
-            }
+            for (int k = 0; k < 6; k++) mkBench(V3(x0 + 8 + k * 13, 0, mz + ((k & 1) ? 2.6f : -2.6f)), 0);
+            for (int k = 0; k < 4; k++) mkBench(V3(mx + ((k & 1) ? 2.6f : -2.6f), 0, z0 + 10 + k * 18), PI / 2);
             continue;
         }
-        // 2-4 здания по периметру квартала
-        int layout = r.i(3);
-        std::vector<std::pair<V3, V3>> boxes;
-        float mx = (x0 + x1) * 0.5f, mz = (z0 + z1) * 0.5f;
-        if (layout == 0) {
-            boxes.push_back({V3(mx - 21, 0, mz - 21), V3(18, 0, 18)}); boxes.push_back({V3(mx + 21, 0, mz - 21), V3(18, 0, 18)});
-            boxes.push_back({V3(mx - 21, 0, mz + 21), V3(18, 0, 18)}); boxes.push_back({V3(mx + 21, 0, mz + 21), V3(18, 0, 18)});
-        } else if (layout == 1) {
-            boxes.push_back({V3(mx, 0, mz - 24), V3(38, 0, 12)}); boxes.push_back({V3(mx, 0, mz + 24), V3(38, 0, 12)});
-        } else {
-            boxes.push_back({V3(mx - 24, 0, mz), V3(12, 0, 38)}); boxes.push_back({V3(mx + 22, 0, mz - 18), V3(14, 0, 18)}); boxes.push_back({V3(mx + 22, 0, mz + 24), V3(14, 0, 11)});
+        if (kind == CB_FUEL) {
+            // АЗС у проспекта (ставится в buildFuelStations), позади — автомойка/шиномонтаж и деревья
+            mkBuilding(V3(mx + 14, 0, z1 - 16), 22, 12, 1 + r.i(2), hexc(0xd8d8d0), 1);
+            for (int k = 0; k < 6; k++) mkTree(V3(x0 + 4 + k * 4.5f, 0, z1 - 4 - (k & 1) * 6), 5, 8);
+            continue;
         }
-        for (auto& bx : boxes) {
-            SObj b; b.type = OB_BUILDING; b.p = bx.first; b.yaw = 0;
-            b.floors = 3 + r.i(i == 2 && j == 0 ? 14 : 9);
-            if (r.chance(0.2f)) b.floors = 2 + r.i(3);
-            b.h = V3(bx.second.x, b.floors * 3.2f, bx.second.z);
-            b.col = facades[r.i(8)]; b.col2 = Col(0.35f, 0.33f, 0.32f); b.seed = r.next(); b.radius = sqrtf(b.h.x * b.h.x + b.h.z * b.h.z);
-            b.collide = true; b.ival = r.chance(0.35f) ? 1 : 0;   // 1 — витрины на первом этаже
-            addObj(b);
+        std::vector<std::pair<V3, V3>> boxes; std::vector<int> fl;
+        if (kind == CB_INDUSTRY) {
+            // промзона: цеха и склады, труба, бетонный забор с воротами, контейнеры
+            Col wh[] = {hexc(0xb0b4b8), hexc(0x9aa0a6), hexc(0xc4b8a0), hexc(0x8f9a8a)};
+            int lay = r.i(2);
+            if (lay == 0) {
+                mkPlain(V3(mx - 8, 0, mz + 14), hxB - 14, 14, 9 + r.range(0, 3), wh[r.i(4)], 2);
+                mkPlain(V3(mx + 18, 0, mz - 20), 16, 10, 7, wh[r.i(4)], 2);
+            } else {
+                mkPlain(V3(mx - 18, 0, mz), 14, hzB - 12, 10 + r.range(0, 2), wh[r.i(4)], 2);
+                mkPlain(V3(mx + 20, 0, mz + 18), 14, 12, 7, wh[r.i(4)], 2);
+            }
+            // административный корпус
+            mkBuilding(lay == 0 ? V3(mx - 26, 0, mz - 24) : V3(mx + 22, 0, mz - 24), 10, 7, 3 + r.i(2), hexc(0xc9876a), 0);
+            if ((i + j) & 1 || i == 4) mkPlain(V3(lay == 0 ? mx + 30 : mx - 2, 0, lay == 0 ? mz + 4 : mz + 30), 1.4f, 1.4f, 34 + r.range(0, 8), hexc(0xb03a2e), 5);
+            // контейнеры
+            for (int k = 0; k < 3; k++) {
+                static const uint32_t cc[] = {0x2f6aa0, 0xa04030, 0x3f7a40, 0xc08a30};
+                mkPlain(V3(lay == 0 ? mx + 10 + k * 3.0f : mx + 6, 0, lay == 0 ? mz - 2 : mz - 6 + k * 3.0f), lay == 0 ? 1.25f : 6, lay == 0 ? 6 : 1.25f, 2.6f, hexc(cc[r.i(4)]), 2);
+            }
+            // забор по периметру, ворота посередине стороны, выходящей на улицу с юга
+            float fx0 = x0 - 2.5f, fx1 = x1 + 2.5f, fz0 = z0 - 2.5f, fz1 = z1 + 2.5f; Col fc = hexc(0xa8a8a0);
+            mkPlain(V3(fx0, 0, (fz0 + fz1) * 0.5f), 0.12f, (fz1 - fz0) * 0.5f, 2.4f, fc, 4);
+            mkPlain(V3(fx1, 0, (fz0 + fz1) * 0.5f), 0.12f, (fz1 - fz0) * 0.5f, 2.4f, fc, 4);
+            mkPlain(V3((fx0 + fx1) * 0.5f, 0, fz1), (fx1 - fx0) * 0.5f, 0.12f, 2.4f, fc, 4);
+            float gw = 5;   // ворота
+            mkPlain(V3((fx0 + mx - gw) * 0.5f, 0, fz0), (mx - gw - fx0) * 0.5f, 0.12f, 2.4f, fc, 4);
+            mkPlain(V3((mx + gw + fx1) * 0.5f, 0, fz0), (fx1 - mx - gw) * 0.5f, 0.12f, 2.4f, fc, 4);
+            continue;
         }
-        // деревья во дворах
-        for (int k = 0; k < 4; k++) {
-            SObj t; t.type = OB_TREE; t.p = V3(mx + r.range(-6, 6), 0, mz + r.range(-6, 6)); t.h = V3(0, r.range(5, 8), 0);
-            t.col = Col(0.22f, 0.5f, 0.2f); t.radius = 3; t.seed = r.next(); t.collide = true; t.yaw = 0; t.floors = 0; t.ival = 0;
-            if (layout != 0) addObj(t);
+        if (kind == CB_CENTER) {
+            // центр: башни-высотки и офисы, витрины на первых этажах
+            int lay = r.i(3);
+            if (lay == 0) { boxes.push_back({V3(mx - 20, 0, mz - 20), V3(16, 0, 16)}); fl.push_back(16 + r.i(10));
+                            boxes.push_back({V3(mx + 20, 0, mz + 20), V3(16, 0, 16)}); fl.push_back(12 + r.i(8));
+                            boxes.push_back({V3(mx + 22, 0, mz - 22), V3(14, 0, 12)}); fl.push_back(5 + r.i(4));
+                            boxes.push_back({V3(mx - 22, 0, mz + 22), V3(14, 0, 12)}); fl.push_back(5 + r.i(4)); }
+            else if (lay == 1) { boxes.push_back({V3(mx, 0, mz - 24), V3(hxB - 2, 0, 12)}); fl.push_back(6 + r.i(4));
+                                 boxes.push_back({V3(mx - 16, 0, mz + 18), V3(14, 0, 14)}); fl.push_back(18 + r.i(8));
+                                 boxes.push_back({V3(mx + 22, 0, mz + 22), V3(12, 0, 12)}); fl.push_back(9 + r.i(6)); }
+            else { boxes.push_back({V3(mx, 0, mz), V3(18, 0, 18)}); fl.push_back(20 + r.i(8));
+                   boxes.push_back({V3(mx - 30, 0, mz), V3(8, 0, hzB - 4)}); fl.push_back(5 + r.i(3));
+                   boxes.push_back({V3(mx + 30, 0, mz), V3(8, 0, hzB - 4)}); fl.push_back(5 + r.i(3)); }
+            for (size_t k = 0; k < boxes.size(); k++)
+                mkBuilding(boxes[k].first, boxes[k].second.x, boxes[k].second.z, fl[k], glassCols[r.i(6)], r.chance(0.7f) ? 1 : 0);
+            continue;
         }
+        // жилой район: панельные дома 9–16 этажей, дворы с деревьями и лавочками
+        int lay = r.i(3);
+        Col pc = panelCols[r.i(6)];
+        if (lay == 0) {          // «корабль» вдоль улицы + дом буквой Г
+            mkBuilding(V3(mx, 0, z1 - 7), hxB - 2, 6.5f, 9 + r.i(2) * 3, pc, 3);
+            mkBuilding(V3(x0 + 7, 0, mz - 8), 6.5f, hzB - 18, 9 + r.i(2) * 3, panelCols[r.i(6)], 3);
+            mkBuilding(V3(mx + 14, 0, z0 + 8), 20, 6, 5, hexc(0xc9a080), r.chance(0.5f) ? 1 : 0);   // пятиэтажка
+        } else if (lay == 1) {   // две параллельные девятиэтажки
+            mkBuilding(V3(mx, 0, mz - 22), hxB - 4, 6.5f, 9, pc, 3);
+            mkBuilding(V3(mx, 0, mz + 22), hxB - 4, 6.5f, 9 + r.i(3) * 2, pc, 3);
+        } else {                 // точечные башни
+            mkBuilding(V3(mx - 22, 0, mz - 22), 9, 9, 14 + r.i(4), pc, 3);
+            mkBuilding(V3(mx + 22, 0, mz + 22), 9, 9, 14 + r.i(4), pc, 3);
+            mkBuilding(V3(mx + 22, 0, mz - 22), 9, 9, 12 + r.i(4), panelCols[r.i(6)], 3);
+            mkBuilding(V3(mx - 22, 0, mz + 24), 12, 7, 5, hexc(0xc9a080), 1);
+        }
+        // двор: деревья и лавочки
+        for (int k = 0; k < 7; k++) mkTree(V3(mx + r.range(-10, 10), 0, mz + r.range(-8, 8)), 5, 9);
+        for (int k = 0; k < 2; k++) mkBench(V3(mx + (k ? 6.f : -6.f), 0, mz + 10.5f), 0);
     }
     // фонари и деревья вдоль городских улиц, ларьки
     for (size_t ei = 0; ei < EDGES.size(); ei++) {
@@ -48415,7 +48525,7 @@ static void buildScenery() {
                 SObj k; k.type = OB_KIOSK; float s = e.slen * r.range(0.3f, 0.7f); int side = r.chance(0.5f) ? 1 : -1;
                 k.p = e.pa + e.dir * s + rr * (side * (e.halfW + e.sidewalk + 3.0f)); k.yaw = e.yaw + (side > 0 ? -PI / 2 : PI / 2);
                 k.h = V3(1.8f, 2.6f, 1.4f); k.col = r.chance(0.5f) ? hexc(0x3070b0) : hexc(0x40a050); k.radius = 2.5f; k.collide = true; k.seed = r.next(); k.floors = 0; k.ival = 0;
-                if (!pointNearRoad(k.p, 0.5f)) addObj(k);
+                if (!pointNearRoad(k.p, 0.5f) && !overlapsBuilding(k.p, 3.0f)) addObj(k);
             }
         } else {
             // отбойник с обеих сторон, деревья и поля дальше
@@ -48470,11 +48580,11 @@ static void buildScenery() {
     struct PD { int a, b; float s; };
     int ne = (int)EDGES.size();
     auto findEdge = [&](int na, int nb) { for (int i = 0; i < ne; i++) if ((EDGES[i].a == na && EDGES[i].b == nb) || (EDGES[i].a == nb && EDGES[i].b == na)) return i; return 0; };
-    int city = findEdge(CITY_N[2][1], CITY_N[3][1]);
+    int city = findEdge(CITY_N[3][CITY_AVE], CITY_N[4][CITY_AVE]);   // будка — на проспекте
     int east = 0, north = 0, west = 0;
     for (int i = 0; i < ne; i++) {
         const Edge& e = EDGES[i];
-        if (e.highway && fabsf(e.dir.z) > 0.9f && NODES[e.a].p.x > 700 && e.slen > 1000) east = i;
+        if (e.highway && fabsf(e.dir.z) > 0.9f && NODES[e.a].p.x > 700 && NODES[e.b].p.z > 1000 && e.slen > 1000) east = i;
         if (e.highway && fabsf(e.dir.x) > 0.9f && NODES[e.a].p.z > 1300) north = i;
         if (e.highway && fabsf(e.dir.z) > 0.9f && NODES[e.a].p.x < -650 && NODES[e.a].p.z > 200 && NODES[e.b].p.z < 0) west = i;
     }
@@ -48545,7 +48655,7 @@ static void drawGround() {
         if (!R3.sphereVisible(cc, cs * 0.75f)) continue;
         uint32_t h = hash32((uint32_t)(cx + dx + 1000) * 7919u + (uint32_t)(cz + dz + 1000) * 104729u);
         Col g;
-        bool cityArea = (cc.x > -40 && cc.x < 370 && cc.z > -40 && cc.z < 370);
+        bool cityArea = (cc.x > -40 && cc.x < 590 && cc.z > -40 && cc.z < 590);
         if (cityArea) g = Col(0.42f, 0.44f, 0.4f);
         else {
             // поля крупными участками
@@ -48600,6 +48710,27 @@ static void drawRoads() {
             }
         }
     }
+    // 1в) аллеи в парках
+    for (const ParkRect& pk : PARKS) {
+        V3 c((pk.x0 + pk.x1) * 0.5f, 0, (pk.z0 + pk.z1) * 0.5f);
+        if (dist2d(c, cam) > maxD + 60 || !R3.sphereVisible(c, 70)) continue;
+        Col sand(0.62f, 0.56f, 0.44f), bed(0.5f, 0.27f, 0.3f), grass(0.3f, 0.45f, 0.22f);
+        float y = 0.02f, w = 1.8f, ex = 5.5f;   // аллеи выходят на тротуар
+        for (int k = 0; k < 3; k++) for (int q = 0; q < 3; q++) {   // газон
+            float xa = pk.x0 - 3 + (pk.x1 - pk.x0 + 6) * k / 3, xb = pk.x0 - 3 + (pk.x1 - pk.x0 + 6) * (k + 1) / 3;
+            float za = pk.z0 - 3 + (pk.z1 - pk.z0 + 6) * q / 3, zb = pk.z0 - 3 + (pk.z1 - pk.z0 + 6) * (q + 1) / 3;
+            flatQuad(V3(xa, 0.012f, za), V3(xa, 0.012f, zb), V3(xb, 0.012f, zb), V3(xb, 0.012f, za), grass);
+        }
+        for (int k = 0; k < 4; k++) {
+            float a = pk.x0 - ex + (pk.x1 - pk.x0 + 2 * ex) * k / 4, b2 = pk.x0 - ex + (pk.x1 - pk.x0 + 2 * ex) * (k + 1) / 4;
+            flatQuad(V3(a, y, c.z - w), V3(a, y, c.z + w), V3(b2, y, c.z + w), V3(b2, y, c.z - w), sand);
+            a = pk.z0 - ex + (pk.z1 - pk.z0 + 2 * ex) * k / 4; b2 = pk.z0 - ex + (pk.z1 - pk.z0 + 2 * ex) * (k + 1) / 4;
+            flatQuad(V3(c.x - w, y, a), V3(c.x - w, y, b2), V3(c.x + w, y, b2), V3(c.x + w, y, a), sand);
+        }
+        // площадь с клумбой посередине
+        flatQuad(V3(c.x - 7, y + 0.005f, c.z - 7), V3(c.x - 7, y + 0.005f, c.z + 7), V3(c.x + 7, y + 0.005f, c.z + 7), V3(c.x + 7, y + 0.005f, c.z - 7), sand);
+        flatQuad(V3(c.x - 3.5f, y + 0.012f, c.z - 3.5f), V3(c.x - 3.5f, y + 0.012f, c.z + 3.5f), V3(c.x + 3.5f, y + 0.012f, c.z + 3.5f), V3(c.x + 3.5f, y + 0.012f, c.z - 3.5f), bed);
+    }
     // 1а) карман досмотра и площадка у стационарного поста
     for (const StatPost& S : SPOSTS) {
         if (dist2d(S.c, cam) > maxD + 60) continue;
@@ -48634,6 +48765,19 @@ static void drawRoads() {
         };
         float xr = -F.hw - 3.0f, xl = -F.hw + 0.5f;   // полоса торможения/разгона (поверх обочины)
         float hl = F.hl, LT = 30;                     // отгон
+        if (F.city) {
+            // городская: площадка за тротуаром, въезд и выезд — понижения бордюра через тротуар
+            rect(-F.hw + 0.5f, F.hw, -hl, hl, y1, conc, 4);
+            float xs = -F.hw - EDGES[F.edge].sidewalk - 0.25f;
+            rect(xs, -F.hw + 0.5f, -hl, -hl + FUEL_THROAT, 0.045f, asph, 1);
+            rect(xs, -F.hw + 0.5f, hl - FUEL_THROAT, hl, 0.045f, asph, 1);
+            if (dist2d(F.c, cam) > 200) continue;
+            for (int sd = -1; sd <= 1; sd += 2) rect(-1.0f + sd * 4.4f - 0.08f, -1.0f + sd * 4.4f + 0.08f, -8, 8, y2, line, 1);
+            for (float x = -F.hw + 0.8f; x < -F.hw + 3.6f; x += 1.0f)   // «уступи» на выезде
+                flatQuad(Q(x, hl - 1.4f, y2), Q(x + 0.35f, hl - 0.6f, y2), Q(x + 0.7f, hl - 1.4f, y2), Q(x, hl - 1.4f, y2), line);
+            { float cx = -5.5f; rect(cx - 0.12f, cx + 0.12f, -hl + 4, -hl + 6.5f, y2, line, 1); flatQuad(Q(cx - 0.5f, -hl + 6.5f, y2), Q(cx, -hl + 7.6f, y2), Q(cx + 0.5f, -hl + 6.5f, y2), Q(cx - 0.5f, -hl + 6.5f, y2), line); }
+            continue;
+        }
         // площадка и горловины въезда/выезда
         rect(-F.hw + 0.5f, F.hw, -hl, hl, y1, conc, 4);
         rect(xr, -F.hw + 0.5f, -hl - 1, -hl + FUEL_THROAT, y1, asph, 1);
@@ -48786,6 +48930,23 @@ static void drawRoads() {
             }
         } else {
             float st = floorf(sFrom / 6) * 6;
+            if (e.lanes > 1) {
+                // проспект: двойная сплошная по оси, прерывистые между полосами
+                float a0 = std::max(sFrom, 4.6f), b0 = std::min(sTo, e.slen - 4.6f);
+                if (b0 > a0) for (int k = -1; k <= 1; k += 2) {
+                    V3 a = e.pa + e.dir * a0, b = e.pa + e.dir * b0, o = rr * (k * 0.15f);
+                    flatQuad(a + o - rr * 0.06f + y, b + o - rr * 0.06f + y, b + o + rr * 0.06f + y, a + o + rr * 0.06f + y, white);
+                }
+                for (float s = st; s < sTo - 6; s += 6) {
+                    if (s < 8 || s > e.slen - 10) continue;
+                    V3 a = e.pa + e.dir * s, b = e.pa + e.dir * (s + 3);
+                    if (dist2d(a, cam) > 120) continue;
+                    for (int ln = 1; ln < e.lanes; ln++) for (int k = -1; k <= 1; k += 2) {
+                        V3 o = rr * (k * ln * e.laneW);
+                        flatQuad(a + o - rr * 0.07f + y, b + o - rr * 0.07f + y, b + o + rr * 0.07f + y, a + o + rr * 0.07f + y, white);
+                    }
+                }
+            } else
             for (float s = st; s < sTo - 6; s += 6) {
                 if (s < 8 || s > e.slen - 10) continue;
                 V3 a = e.pa + e.dir * s, b = e.pa + e.dir * (s + 3);
@@ -48871,6 +49032,43 @@ static void drawBuilding(const SObj& b, float dist) {
         if (dot(R3.pos - a, n) <= 0) continue;   // стена смотрит от камеры
         float wl = dist2d(a, bb);
         Col s = shadeN(b.col, n, a + V3(0, H * 0.5f, 0));
+        if (b.ival == 2 || b.ival == 4 || b.ival == 5) {
+            // склад/цех, забор, труба — без окон
+            if (b.ival == 5) {   // труба: красно-белые полосы
+                int nb = std::max(2, (int)(H / 4.0f));
+                for (int k = 0; k < nb; k++) {
+                    float y0 = H * k / nb, y1 = H * (k + 1) / nb;
+                    Col cc = (k & 1) ? shadeN(Col(0.92f, 0.92f, 0.9f), n, a) : s;
+                    R3.quadW(a + V3(0, y0, 0), bb + V3(0, y0, 0), bb + V3(0, y1, 0), a + V3(0, y1, 0), fogged(cc, dist), 2, 0, 0);
+                }
+                continue;
+            }
+            if (b.ival != 2 || wl < 10) { quadSub(a, bb, bb + V3(0, H, 0), a + V3(0, H, 0), fogged(s, dist), 0, 6.0f); continue; }
+            // склад: стена режется на колонны по воротам, чтобы ничего не накладывалось; тёмный пояс под кровлей
+            {
+                V3 dw = (bb - a) * (1.0f / wl);
+                int nd = std::min(3, (int)(wl / 14));
+                float dh = std::min(4.5f, H - 1.6f), bandY = H - 0.9f;
+                SDL_Color wc = fogged(s, dist), bc = fogged(s * 0.7f, dist);
+                SDL_Color dc = fogged(shadeN(Col(0.42f, 0.44f, 0.46f), n, a), dist), lc = fogged(shadeN(Col(0.3f, 0.32f, 0.34f), n, a), dist);
+                auto col = [&](float u0, float u1, float y0) {   // кусок стены от y0 до пояса + пояс
+                    V3 p0 = a + dw * u0, p1 = a + dw * u1;
+                    quadSub(p0 + V3(0, bandY, 0), p1 + V3(0, bandY, 0), p1 + V3(0, y0, 0), p0 + V3(0, y0, 0), wc, 0, 6.0f);
+                    quadSub(p0 + V3(0, H, 0), p1 + V3(0, H, 0), p1 + V3(0, bandY, 0), p0 + V3(0, bandY, 0), bc, 0, 6.0f);
+                };
+                float u = 0;
+                for (int k = 0; k < nd; k++) {
+                    float cpos = wl * (k + 1) / (nd + 1), d0 = cpos - 2.2f, d1 = cpos + 2.2f;
+                    col(u, d0, 0); col(d0, d1, dh); u = d1;
+                    V3 p0 = a + dw * d0, p1 = a + dw * d1;
+                    R3.quadW(p0 + V3(0, dh, 0), p1 + V3(0, dh, 0), p1, p0, dc, 2, 0, 0);
+                    if (dist < 110) { V3 off = n * 0.03f; for (float yy = 0.6f; yy < dh; yy += 0.6f)
+                        R3.quadW(p0 + V3(0, yy + 0.05f, 0) + off, p1 + V3(0, yy + 0.05f, 0) + off, p1 + V3(0, yy - 0.05f, 0) + off, p0 + V3(0, yy - 0.05f, 0) + off, lc, 2, 0, -0.2f); }
+                }
+                col(u, wl, 0);
+            }
+            continue;
+        }
         if (dist > 170) {
             SDL_Color sc = fogged(s * 0.9f, dist);
             R3.quadW(a, bb, bb + V3(0, H, 0), a + V3(0, H, 0), sc, 2, 0, 0);
@@ -48896,10 +49094,18 @@ static void drawBuilding(const SObj& b, float dist) {
                 R3.quadWT(p0 + V3(0, y1, 0), p1 + V3(0, y1, 0), p1 + V3(0, y0, 0), p0 + V3(0, y0, 0), sc, uvp(tx + 0.5f, WIN_Y + 0.5f), uvp(tx + 15.5f, WIN_Y + 0.5f), uvp(tx + 15.5f, WIN_Y + 15.5f), uvp(tx + 0.5f, WIN_Y + 15.5f), 2, 0, 0);
             }
         }
+        if (b.ival == 3 && dist < 130) {
+            // панельный дом: межпанельные швы по этажам
+            V3 off = n * 0.03f; SDL_Color sc = fogged(s * 0.72f, dist);
+            for (int fl = 1; fl < b.floors; fl++) {
+                float y = fl * 3.2f;
+                R3.quadW(a + off + V3(0, y + 0.06f, 0), bb + off + V3(0, y + 0.06f, 0), bb + off + V3(0, y - 0.06f, 0), a + off + V3(0, y - 0.06f, 0), sc, 2, 0, -0.6f);
+            }
+        }
     }
-    // крыша и парапет
+    // крыша и парапет (снизу не видна)
     Col roof = shadeN(b.col2, V3(0, 1, 0), c);
-    if (R3.pos.y > H - 1 || true) {
+    if (R3.pos.y > H) {
         SDL_Color sc = fogged(roof, dist);
         R3.quadW(corners[0] + V3(0, H, 0), corners[1] + V3(0, H, 0), corners[2] + V3(0, H, 0), corners[3] + V3(0, H, 0), sc, 2, 0, 0.5f);
     }
@@ -49639,6 +49845,7 @@ struct AICar {
     float overT = 0; int overMode = 0;           // обгон: 1 по встречке, 2 по обочине
     int crashEvent = 0;                          // 1 — авария, но едет дальше; 2 — разбился (для игры)
     bool wrecked = false;
+    float blockT = 0; int blockSide = 0;          // упёрся в стоящую машину (её прицеп/кузов заходит в полосу)
 };
 static bool gAccActive = false; static V3 gAccPos;   // место ДТП (для трафика)
 static std::vector<AICar> CARS;
@@ -50353,9 +50560,10 @@ static void updateAICar(AICar& c, int idx, float dt) {
         if (!c.turning && c.lane < e.lanes - 1) {
             c.pullWait += dt;
             tryLaneChange(c, e.lanes - 1, c.pullWait > 2.5f);   // инспектор сзади пропускает
+            if (c.pullWait > 8 && c.lane < e.lanes - 1 && c.speed < 1.0f) { c.mode = CMODE_STOPPED; c.modeT = 0; c.speed = 0; c.blink = 2; }   // не перестроиться — встать с аварийкой
         }
         bool rightLane = c.lane >= e.lanes - 1;
-        if (!c.turning) c.latTarget = rightLane ? shoulderLat(c) : 0.0f;
+        if (!c.turning) c.latTarget = rightLane ? shoulderLat(c) + (c.trailer && EDGES[c.edge].highway ? 0.6f : 0.0f) : 0.0f;
         c.blink = 1;
         bool there = !c.turning && rightLane && fabsf(c.lat - c.latTarget) < 0.6f;
         v0 = there ? 0.0f : std::max(4.0f, std::min(v0, 9.0f));
@@ -50368,6 +50576,7 @@ static void updateAICar(AICar& c, int idx, float dt) {
             for (const AICar& o : CARS) {
                 if (!o.alive || &o == &c || o.turning || o.edge != c.edge || o.dir != c.dir || o.lane != c.lane || fabsf(o.lat) > 1.3f) continue;
                 float ds = o.s - c.s, need = c.halfL + o.halfL + 2.5f;
+                if (ds < 0 && o.speed < 1.0f) continue;   // стоящие сзади ждут нас — им не мешаем, выезжаем
                 if (ds > -need - std::max(0.f, o.speed) * 1.8f && ds < need) { busy = true; break; }
             }
             if (busy) { c.latTarget = c.lat; c.modeT = std::min(c.modeT, 1.4f); }
@@ -50606,6 +50815,15 @@ static void updateAICar(AICar& c, int idx, float dt) {
             if ((c.overT <= 0 && !sideBusy) || c.turning || distEnd < 25) { c.overMode = 0; c.latTarget = 0; }
         }
     }
+    // упёрлись в стоящую на обочине машину (часто — в прицеп фуры): объехать
+    if (c.blockT > 0) {
+        c.blockT -= dt * 0.5f;
+        if (c.blockT > 1.2f && !c.turning && (c.mode == CMODE_DRIVE || c.mode == CMODE_LEAVE)) {
+            if (e.lanes > 1 && e.slen - c.s > 90) tryLaneChange(c, c.lane == 0 ? 1 : c.lane - 1);
+            if (c.blockT > 2.5f) c.latTarget = -c.blockSide * (e.lanes > 1 ? 1.1f : 1.3f);   // протиснуться рядом
+        }
+        if (c.blockT > 6) c.blockT = 6;
+    } else if (c.blockSide && c.mode == CMODE_DRIVE && c.yieldT <= 0 && c.overMode == 0) { c.latTarget = 0; c.blockSide = 0; }
     // обгон/перестроение на трассе
     if (!c.turning && e.lanes > 1 && (c.mode == CMODE_DRIVE || c.mode == CMODE_FLEE)) {
         if (gap < 35 && vl < v0 * 0.85f && c.lane == 1 && grng.chance(dt * (c.mode == CMODE_FLEE ? 4.0f : 0.8f))) tryLaneChange(c, 0);
@@ -50797,6 +51015,9 @@ static void updateTraffic(float dt, bool spawn) {
                 if (touching) vb = 0;
                 a.speed = std::min(a.speed, vb); a.brake = true;
                 a.holdV = a.holdV < 0 ? vb : std::min(a.holdV, vb);
+                if (b.speed < 0.3f && (b.mode == CMODE_STOPPED || b.mode == CMODE_PULLOVER || b.crashed || b.mode == CMODE_LEAVE)) {
+                    a.blockT += dt * 1.0f; float la = dot(d, rightOf(a.yaw)); a.blockSide = la > 0 ? 1 : -1;
+                }
             }
         }
     }
@@ -53391,18 +53612,18 @@ static void drawMap() {
     panel(mx - u * 3, mt - u * 3, areaW + u * 6, areaH + u * 6, RGBA(30, 45, 35, 255));
     // районы
     for (int d = 0; d < 4; d++) {
-        V3 c = d == 0 ? V3(165, 0, 165) : (d == 1 ? V3(800, 0, -300) : (d == 2 ? V3(50, 0, 1400) : V3(-700, 0, -300)));
+        V3 c = d == 0 ? V3(275, 0, -25) : (d == 1 ? V3(800, 0, -300) : (d == 2 ? V3(50, 0, 1400) : V3(-700, 0, -300)));
         float sx, sy; P(c, sx, sy);
         bool locked = rankOf(SV.rep) < DISTRICT_RANK[d];
         SDL_Color col = locked ? RGBA(200, 120, 120) : RGBA(200, 230, 200);
-        float ty = d == 0 ? sy + u * 18 : (d == 2 ? sy - u * 16 : sy);
+        float ty = d == 0 ? sy + u * 6 : (d == 2 ? sy - u * 16 : sy);
         float tx = d == 1 ? sx - u * 8 : (d == 3 ? sx + u * 8 : sx);
         UI.text(tx, ty, DISTRICT_NAMES[d], u * 0.85f, col, d == 1 ? 2 : (d == 3 ? 0 : 1), true);
         if (locked) UI.text(tx, ty + u * 9, fmt("С ЗВАНИЯ %s", RANKS[DISTRICT_RANK[d]]).c_str(), u * 0.7f, col, d == 1 ? 2 : (d == 3 ? 0 : 1));
     }
     for (const Edge& e : EDGES) {
         float ax, ay, bx, by; P(NODES[e.a].p, ax, ay); P(NODES[e.b].p, bx, by);
-        UI.line(ax, ay, bx, by, e.highway ? u * 3.5f : u * 2.2f, e.highway ? RGBA(210, 210, 215) : RGBA(150, 155, 165));
+        UI.line(ax, ay, bx, by, e.highway ? u * 3.5f : (e.lanes > 1 ? u * 3.0f : u * 2.0f), e.highway ? RGBA(210, 210, 215) : (e.lanes > 1 ? RGBA(195, 190, 170) : RGBA(150, 155, 165)));
     }
     for (int k = 0; k < 4; k++) { float sx, sy; P(POSTS[k].pos, sx, sy); UI.circle(sx, sy, u * 4, RGBA(60, 120, 255)); UI.text(sx, sy - u * 3, "П", u * 0.8f, C_WHITE, 1); }
     for (const FuelStation& F : FUELS) { float sx, sy; P(F.c, sx, sy); UI.roundRect(sx - u * 4, sy - u * 4, u * 8, u * 8, u * 1.5f, RGBA(200, 40, 40)); UI.text(sx, sy - u * 3, "А", u * 0.8f, C_WHITE, 1); }
