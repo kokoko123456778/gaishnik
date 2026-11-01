@@ -48384,6 +48384,9 @@ static void buildFuelStations(Rng& r) {
         for (int k = 0; k < 3 && !F.city; k++) {
             static const float dz[3] = {500, 150, 0}; static const int lab[3] = {500, 150, 0};
             if (F.s - F.hl - FUEL_LANE - dz[k] < 40) continue;   // знак не дальше начала участка трассы
+            { V3 sp = P(-F.hw + 1.0f, -F.hl - FUEL_LANE - dz[k]); bool nearPost = false;
+              for (const StatPost& SP : SPOSTS) if (dist2d(sp, SP.c) < 80) nearPost = true;
+              if (nearPost) continue; }   // у поста ДПС знак не ставим — загораживает обзор
             SObj g; g.type = OB_FSIGN; g.p = P(-F.hw + 1.0f, -F.hl - FUEL_LANE - dz[k]); g.yaw = F.yaw; g.h = V3(0, 3, 0); g.radius = 2; g.collide = true;
             g.seed = 0; g.floors = lab[k]; g.ival = id; addObj(g);
         }
@@ -48996,6 +48999,7 @@ static void shadedBox(const V3& c, const V3& h, float yaw, const Col& col, int c
     bool big = h.x > 0.7f || h.y > 0.7f || h.z > 0.7f;
     for (int k = 0; k < 5; k++) {
         // грань, отвёрнутая от камеры, не видна (коробка замкнута)
+        if (k == cull) continue;   // эту грань рисует вызывающий сам
         V3 fc = (p[fs[k].a] + p[fs[k].c]) * 0.5f;
         if (big && dot(R3.pos - fc, fs[k].n) < 0) continue;
         Col base = (k == 2 && top) ? *top : col;
@@ -49003,7 +49007,6 @@ static void shadedBox(const V3& c, const V3& h, float yaw, const Col& col, int c
         SDL_Color sc = fogged(s, d);
         if (big) quadSub(p[fs[k].a], p[fs[k].b], p[fs[k].c], p[fs[k].d], sc, bias, 0.8f);
         else R3.quadW(p[fs[k].a], p[fs[k].b], p[fs[k].c], p[fs[k].d], sc, 2, 0, bias);
-        (void)cull;
     }
 }
 
@@ -49305,17 +49308,29 @@ static void drawStatPost(const SObj& o, float dist) {
     // здание поста: 2 этажа + «стакан»
     {
         V3 b = P(23, 0, 0);
-        shadedBox(b + up * 3.3f, V3(4.6f, 3.3f, 7.2f), S.yaw, white, -1, &grey);
+        shadedBox(b + up * 3.3f, V3(4.6f, 3.3f, 7.2f), S.yaw, white, 1, &grey);   // фасад к дороге рисуется ниже сеткой
         Col gl = night ? Col(1, 0.9f, 0.62f) : shadeN(Col(0.22f, 0.32f, 0.45f), -r, b);
-        V3 fc = b - r * 4.62f;
+        V3 fc = b - r * 4.6f;
         if (dot(R3.pos - fc, -r) > 0) {
-            quadSub(fc - f * 7.2f + up * 1.55f, fc + f * 7.2f + up * 1.55f, fc + f * 7.2f + up * 1.15f, fc - f * 7.2f + up * 1.15f, fogged(shadeN(blue, -r, fc), dist), -0.5f, 1.5f);   // синяя полоса
-            for (int k = -2; k <= 2; k++) {   // окна 1-го и 2-го этажа
-                V3 w1 = fc - r * 0.02f + f * (k * 2.8f);
-                if (k != 0) quadSub(w1 - f * 0.9f + up * 2.9f, w1 + f * 0.9f + up * 2.9f, w1 + f * 0.9f + up * 1.9f, w1 - f * 0.9f + up * 1.9f, fogged(gl, dist * (night ? 0.4f : 1)), -0.9f, 1.0f);
-                quadSub(w1 - f * 1.0f + up * 5.9f, w1 + f * 1.0f + up * 5.9f, w1 + f * 1.0f + up * 4.6f, w1 - f * 1.0f + up * 4.6f, fogged(gl, dist * (night ? 0.4f : 1)), -0.9f, 1.0f);
+            // фасад — сетка ячеек без наложений (стена/окно/дверь/синяя полоса), иначе вблизи окна «рвутся»
+            std::vector<float> xs = {-7.2f, 7.2f}, ys = {0, 1.15f, 1.55f, 1.9f, 2.4f, 2.9f, 4.6f, 5.9f, 6.6f};
+            for (int k = -2; k <= 2; k++) { xs.push_back(k * 2.8f - 0.9f); xs.push_back(k * 2.8f + 0.9f); xs.push_back(k * 2.8f - 1.0f); xs.push_back(k * 2.8f + 1.0f); }
+            xs.push_back(-0.8f); xs.push_back(0.8f);
+            std::sort(xs.begin(), xs.end()); xs.erase(std::unique(xs.begin(), xs.end()), xs.end());
+            Col wallC = shadeN(white, -r, fc), bandC = shadeN(blue, -r, fc);
+            SDL_Color sw = fogged(wallC, dist), sb = fogged(bandC, dist), sg = fogged(gl, dist * (night ? 0.4f : 1)), sd = fogged(dark, dist);
+            for (size_t i = 0; i + 1 < xs.size(); i++) for (size_t j = 0; j + 1 < ys.size(); j++) {
+                float x0 = xs[i], x1 = xs[i + 1], y0 = ys[j], y1 = ys[j + 1], cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
+                if (x1 - x0 < 0.01f) continue;
+                SDL_Color c = sw;
+                float km = roundf(cx / 2.8f), lx = cx - km * 2.8f;
+                if (fabsf(cx) < 0.8f && cy < 2.4f) c = sd;                                         // дверь
+                else if (cy > 1.15f && cy < 1.55f) c = sb;                                         // синяя полоса
+                else if (cy > 1.9f && cy < 2.9f && km != 0 && fabsf(lx) < 0.9f) c = sg;           // окна 1-го этажа
+                else if (cy > 4.6f && cy < 5.9f && fabsf(lx) < 1.0f && fabsf(km) <= 2) c = sg;    // окна 2-го этажа
+                V3 a0 = fc + f * x0 + up * y1, a1 = fc + f * x1 + up * y1, a2 = fc + f * x1 + up * y0, a3 = fc + f * x0 + up * y0;
+                quadSub(a0, a1, a2, a3, c, 0, 1.6f);
             }
-            quadSub(fc - r * 0.02f - f * 0.8f + up * 2.4f, fc - r * 0.02f + f * 0.8f + up * 2.4f, fc - r * 0.02f + f * 0.8f, fc - r * 0.02f - f * 0.8f, fogged(dark, dist), -0.9f, 1.0f);   // дверь
             if (dist < 220) drawText3D(fc - r * 0.03f + up * 4.0f + f * 0.0f, -f, up, "ДПС", 0.11f, fogged(blue, dist), -1.2f);
             if (dist < 160) drawText3D(fc - r * 0.03f + up * 3.25f, -f, up, "СТАЦИОНАРНЫЙ ПОСТ ДПС ГИБДД", 0.028f, fogged(blue, dist), -1.2f);
         }
@@ -50505,12 +50520,16 @@ static void updateAICar(AICar& c, int idx, float dt) {
         // коллега едет по следу беглеца
         if (c.helperTarget < 0 || c.helperTarget >= (int)CARS.size() || !CARS[c.helperTarget].alive) { c.mode = CMODE_GONE; return; }
         AICar& t = CARS[c.helperTarget];
+        // точки следа, которые уже рядом или остались позади, пропускаем (на скорости иначе машина кружит вокруг точки)
+        while (c.trailIdx < (int)t.trail.size()) {
+            V3 dd = t.trail[c.trailIdx] - c.pos; dd.y = 0; float ll = len(dd);
+            if (ll < 3 + c.speed * 0.15f || (ll < 30 && dot(dd, fwdOf(c.yaw)) < 0)) c.trailIdx++; else break;
+        }
         V3 goal = c.trailIdx < (int)t.trail.size() ? t.trail[c.trailIdx] : t.pos;
         V3 d = goal - c.pos; d.y = 0; float l = len(d);
-        if (l < 3 && c.trailIdx < (int)t.trail.size()) { c.trailIdx++; }
         float dt2 = dist2d(c.pos, t.pos);
-        float vt = dt2 > 18 ? std::max(t.speed * 1.12f + 4, 12.f) : t.speed * 0.95f;
-        c.speed = approach(c.speed, std::min(vt, 52.f), 6 * dt);
+        float vt = std::max(t.speed + clampf((dt2 - 10) * 0.6f, -4, 22), 10.f);   // держаться в ~10 м за беглецом
+        c.speed = approach(c.speed, std::min(vt, 72.f), 8.5f * dt);
         if (l > 0.1f) {
             float ty = atan2f(d.x, d.z);
             c.yaw = wrapAngle(c.yaw + clampf(wrapAngle(ty - c.yaw), -2.5f * dt, 2.5f * dt));
@@ -51031,7 +51050,7 @@ static void drawAICar(const AICar& c, float time, bool highlight) {
     DrawCar d;
     d.pos = c.pos; d.yaw = c.yaw; d.pitch = c.pitch; d.roll = c.roll; d.paint = c.paint; d.paint2 = c.paint2;
     d.plate = c.plate; d.taxi = c.taxi; d.police = c.police || c.mode == CMODE_HELPER || c.mode == CMODE_BLOCK;
-    d.flash = d.police; d.headOn = (L.night > 0.35f || L.rain > 0.5f) && !(c.vice == 3 && c.mode == CMODE_DRIVE); d.brake = c.brake; d.blink = c.blink;
+    d.flash = d.police && c.mode != CMODE_BLOCK; d.headOn = (L.night > 0.35f || L.rain > 0.5f) && !(c.vice == 3 && c.mode == CMODE_DRIVE); d.brake = c.brake; d.blink = c.blink;
     d.spin = c.spin; d.steer = c.steerVis; d.time = time + (c.id % 7) * 0.13f; d.highlight = highlight;
     d.flatMask = c.flatMask;
     if (c.flatMask) {   // крен на сторону спущенных колёс
@@ -51966,6 +51985,7 @@ static void clearWorldActors() {
     gChaseCar = -1; gBlock.active = false; gTarget = -1; gInspect = -1;
     ACC = Accident(); gAccActive = false;
 }
+static void partnerInitShift();
 static void startShift() {
     clearWorldActors();
     SHF = ShiftState();
@@ -51991,6 +52011,7 @@ static void startShift() {
     gClockMin = SHF.minutes;
     { int n0 = (int)clampf(24 * trafficLevelAt(PL.pos), 8, 40); for (int i = 0; i < n0; i++) spawnTrafficCar(PL.pos, 40, 380, false); }
     platePixels(2, "А0166", 66, true); platePixels(3, "А0266", 66, true);
+    partnerInitShift();
     gScreen = SC_DRIVE;
     toast(fmt("СМЕНА НАЧАЛАСЬ. УЧАСТОК: %s. ТРАФИК %s — ДОХОД X%.2f", DISTRICT_NAMES[SHF.district], trafficName(trafficLevelAt(PL.pos)), payMulAt(PL.pos)), 0, 5);
     if (SHF.tutorial) toast("ПОДСКАЗКА: НАЙДИ НАРУШИТЕЛЯ РАДАРОМ, ВКЛЮЧИ МИГАЛКУ И НАЖМИ «ТРЕБОВАТЬ»", 3, 7);
@@ -52151,6 +52172,74 @@ static void requestHelp() {
     gHelpUsed = true;
     toast("РАЦИЯ: ЭКИПАЖ 2-14 ПОДКЛЮЧИЛСЯ К ПРЕСЛЕДОВАНИЮ!", 3, 4);
     sfx(SFX_RADIO, 0.7f, 0, 0, 1.4f);
+}
+// --- напарник: второй экипаж ДПС, который иногда дежурит на стационарном посту и подключается к погоне ---
+struct Partner { int post = -1; bool on = false, away = false; int idx = -1; uint32_t id = 0; float backT = 0; float nextMin = 0; };
+static Partner gPartner;
+static V3 partnerSpot(float& yaw) {
+    const StatPost& S = SPOSTS[gPartner.post];
+    yaw = S.yaw;   // на площадке через дорогу от игрока, лицом к машинам встречного направления
+    return S.c - S.r * 13.5f - S.f * 3.0f;
+}
+static bool partnerAlive() { return gPartner.idx >= 0 && gPartner.idx < (int)CARS.size() && CARS[gPartner.idx].alive && CARS[gPartner.idx].id == gPartner.id; }
+static void spawnPartner() {
+    float y; V3 p = partnerSpot(y);
+    const StatPost& S = SPOSTS[gPartner.post];
+    AICar h; h.alive = true; h.id = gCarIdCounter++; h.model = MD_SEDAN; h.police = true; h.paint = Col(0.95f, 0.95f, 0.96f);
+    h.mode = CMODE_BLOCK; h.pos = p; h.yaw = y; h.speed = 0; h.edge = S.edge; h.dir = 0; h.s = S.s;
+    h.halfW = CM[MD_SEDAN].halfW; h.halfL = CM[MD_SEDAN].halfL; h.plate = 3; h.plateStr = "А0266";
+    int slot = -1;
+    for (size_t i = 0; i < CARS.size(); i++) if (!CARS[i].alive && (int)i != gChaseCar) { slot = (int)i; break; }
+    if (slot < 0) { CARS.push_back(h); slot = (int)CARS.size() - 1; } else CARS[slot] = h;
+    gPartner.idx = slot; gPartner.id = h.id; gPartner.away = false;
+}
+static void partnerInitShift() {
+    gPartner = Partner();
+    for (size_t i = 0; i < SPOSTS.size(); i++) if (SPOSTS[i].district == SHF.district) gPartner.post = (int)i;
+    if (gPartner.post < 0) return;
+    gPartner.on = grng.chance(0.55f);
+    gPartner.nextMin = SHF.minutes + 60 + grng.i(60);
+    if (gPartner.on) { spawnPartner(); toast("НА ПОСТУ ДЕЖУРИТ ВТОРОЙ ЭКИПАЖ — ПОМОЖЕТ В ПОГОНЕ.", 3, 5); }
+}
+static void updatePartner(float dt) {
+    if (gPartner.post < 0) return;
+    float y; V3 spot = partnerSpot(y);
+    bool seen = dist2d(PL.pos, spot) < 140;   // рядом с игроком машина не появляется и не исчезает «из воздуха»
+    bool alive = partnerAlive();
+    // иногда экипаж уезжает по делам и возвращается
+    if (SHF.minutes >= gPartner.nextMin && !seen && gChaseCar < 0) {
+        gPartner.nextMin = SHF.minutes + 60 + grng.i(70);
+        if (gPartner.on && !gPartner.away && grng.chance(0.3f)) {
+            gPartner.on = false;
+            if (alive) CARS[gPartner.idx].alive = false;
+            toast("РАЦИЯ: ЭКИПАЖ 2-14 УБЫЛ С ПОСТА НА ВЫЗОВ.", 3, 3);
+        } else if (!gPartner.on && grng.chance(0.45f)) {
+            gPartner.on = true; gPartner.away = true; gPartner.backT = 0;
+            toast("РАЦИЯ: ЭКИПАЖ 2-14 ЗАСТУПИЛ НА ДЕЖУРСТВО НА ПОСТУ.", 3, 3);
+        }
+    }
+    if (!gPartner.on) return;
+    if (gPartner.away) {
+        // вернуться на пост после погони
+        if (alive && CARS[gPartner.idx].mode == CMODE_HELPER) return;
+        gPartner.backT -= dt;
+        if (gPartner.backT <= 0 && !seen) spawnPartner();
+        return;
+    }
+    if (!alive) { if (!seen) spawnPartner(); return; }
+    AICar& h = CARS[gPartner.idx];
+    // погоня рядом с постом — напарник подключается сам
+    if (h.mode == CMODE_BLOCK && gChaseCar >= 0 && gChaseCar < (int)CARS.size() && CARS[gChaseCar].alive && CARS[gChaseCar].mode == CMODE_FLEE) {
+        AICar& t = CARS[gChaseCar];
+        if (dist2d(t.pos, h.pos) < 260 && t.trail.size() >= 2) {
+            int best = 0; float bd = 1e9f;
+            for (size_t k = 0; k < t.trail.size(); k++) { float d = dist2d(t.trail[k], h.pos); if (d < bd) { bd = d; best = (int)k; } }
+            h.mode = CMODE_HELPER; h.helperTarget = gChaseCar; h.trailIdx = best; h.speed = 0;
+            gPartner.away = true; gPartner.backT = 45;
+            toast("РАЦИЯ: НАПАРНИК С ПОСТА ПОДКЛЮЧИЛСЯ К ПОГОНЕ!", 3, 4);
+            sfx(SFX_RADIO, 0.7f, 0, 0, 1.4f);
+        }
+    }
 }
 // блокпост выставляют только для угнанных/разыскиваемых машин и стритрейсеров
 static bool roadblockAllowed() {
@@ -52438,6 +52527,7 @@ static void updateDrive(float dt) {
     }
     updateFuel(dt);
     updatePost(dt);
+    updatePartner(dt);
     collidePlayerCars(dt);
     updateTraffic(dt, true);
     updatePeds(dt, PL.pos, true);
@@ -52566,7 +52656,7 @@ static void drawMinimap(float x, float y, float sz) {
         if ((int)i == gChaseCar) dot2(c.pos, fmodf(gTime, 0.5f) < 0.25f ? C_RED : C_WHITE, 4.5f);
         else if (c.wanted && !(gIcpt.active && (int)i == gIcpt.idx && dist2d(c.pos, PL.pos) > 60)) dot2(c.pos, RGBA(255, 120, 0), 4);
         else if (c.mode == CMODE_STOPPED && c.caseIdx >= 0) dot2(c.pos, C_YELLOW, 3.5f);
-        else if (c.mode == CMODE_HELPER) dot2(c.pos, RGBA(80, 140, 255), 3.5f);
+        else if (c.mode == CMODE_HELPER || c.mode == CMODE_BLOCK) dot2(c.pos, RGBA(80, 140, 255), 3.5f);
     }
     for (const FuelStation& F : FUELS) {
         float fx, fy; tr(F.c, fx, fy);
