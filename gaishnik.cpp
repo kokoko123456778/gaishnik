@@ -48923,7 +48923,7 @@ struct Mesh { std::vector<V3> v; std::vector<MeshTri> t; };
 struct WheelDef { V3 p; float r, w; bool steer; };
 
 struct CarModel {
-    std::string name;
+    std::string name; std::string brand;   // brand — настоящее название (в документах, ориентировках)
     Mesh lod[4];
     std::vector<MatEntry> mats;
     std::vector<WheelDef> wheels;
@@ -50178,6 +50178,7 @@ static void cleanArches(CarModel& M) {
     }
     finalizeMesh(m);
 }
+static const std::string& carTitle(int mi);
 static void loadAllModels() {
     int n = sizeof(CAR_MODELS_SRC) / sizeof(CAR_MODELS_SRC[0]);
     for (int i = 0; i < n; i++) {
@@ -50191,6 +50192,17 @@ static void loadAllModels() {
         cleanArches(CM.back());
     }
     buildMinibus(); buildTruck(); buildTractor(); buildTrailer();
+    {   // настоящие марки и модели (по порядку CM)
+        static const char* BR[] = {
+            "ТОЙОТА КАМРИ", "НИССАН МИКРА", "БМВ М3 ТУРИНГ", "БМВ Х5", "ТОЙОТА ЛЕНД КРУЗЕР 200", "ТОЙОТА ВЕЛЛФАЙР",
+            "ШЕВРОЛЕ БЛЕЙЗЕР К5", "РАМ 1500 ТРХ", "БМВ М4", "МЕРСЕДЕС Е 50 АМГ", "ТОЙОТА СУПРА", "ФЕРРАРИ Ф40",
+            "МАЗДА 3 МПС", "КИА К5", "ТОЙОТА ГР СУПРА", "АСТОН МАРТИН ВАНКВИШ", "ТОЙОТА ЭСТИМА", "НИССАН ГТ-Р НИСМО",
+            "ТОЙОТА РАВ4", "ВОЛЬВО В60 ПОЛЕСТАР", "ЛЕКСУС РХ 350", "МИЦУБИСИ ЛАНСЕР ЭВО 6", "ФОРД ЭКСПЛОРЕР", "ФОЛЬКСВАГЕН ГОЛЬФ ГТИ",
+            "ФОРД МУСТАНГ", "КИА СПОРТЕЙДЖ", "МИНИ КУПЕР", "АУДИ Е-ТРОН ГТ", "ТОЙОТА СЕЛИКА", "ПОРШЕ 911 ГТ3",
+            "ФОРД ПУМА РАЛЛИ", "МЕРСЕДЕС СЛС АМГ", "АУДИ ЛЕ МАН КВАТТРО",
+            "ГАЗЕЛЬ НЕКСТ", "ГАЗОН НЕКСТ", "КАМАЗ-5490", "ПОЛУПРИЦЕП"};
+        for (size_t i = 0; i < CM.size() && i < sizeof(BR) / sizeof(BR[0]); i++) CM[i].brand = BR[i];
+    }
     buildWheelMesh();
     // диски по классу машины
     static const char* SPORT[] = {"СПОРТКАР", "СУПЕРКАР", "МОЩНЫЙ СЕДАН", "КУПЕ", "КУПЕ ГТ", "СПОРТКУПЕ", "РАЛЛИ-СЕДАН", "ТРЕКОВЫЙ СПОРТКАР", "ХОТ-ХЭТЧ", "РАЛЛИЙНАЯ", "ФАСТБЭК", "ЭЛЕКТРОСЕДАН"};
@@ -50202,6 +50214,8 @@ static void loadAllModels() {
         for (const char* n : TRUCK) if (M.name == n) M.wheelStyle = WS_TRUCK;
     }
 }
+
+static const std::string& carTitle(int mi) { const CarModel& M = CM[mi]; return M.brand.empty() ? M.name : M.brand; }
 
 // =====================================================================
 //  Мир: дорожный граф, застройка, светофоры, пешеходы
@@ -51982,7 +51996,7 @@ struct AICar {
     float yieldT = 0, stuck = 0, crashT = 0, hornT = 0;
     float halfW = 0.9f, halfL = 2.3f;
     std::vector<V3> trail; int helperTarget = -1; int trailIdx = 0;
-    float flashT = 0; bool caught = false; bool checked = false;
+    float flashT = 0; bool caught = false; bool checked = false; float awayT = 0, stopD = 0;   // stopD — расстояние до инспектора в момент остановки; awayT — сколько остановленный водитель ждёт без инспектора
     float exhaustT = 0; uint32_t id = 0;
     bool vanish = false;
     float stuckD = 0, ghostT = 0;
@@ -53523,7 +53537,7 @@ static int createCase(int carIdx, int reason) {
     c.lCats = (car.model == MD_TRUCK || car.model == MD_TRACTOR) ? "B, C, CE" : (car.model == MD_GAZEL ? "B, D" : (grng.chance(0.3f) ? "A, B" : "B, B1"));
     if (c.deprived) c.deprivedUntil = today + 60 + grng.i(500);
     // СТС
-    c.sModel = CM[car.model].name; c.sColor = colorName(car.paint);
+    c.sModel = carTitle(car.model); c.sColor = colorName(car.paint);
     if (car.taxi) c.sColor = "ЖЁЛТЫЙ";
     c.sPlate = car.plateStr; c.sRegion = car.region;
     if (c.plateMismatch) { int r2; c.sPlate = randomPlate(grng, r2); c.sRegion = car.region; }
@@ -53890,7 +53904,7 @@ static float gNextAccMin = 0;
 
 static std::string carDesc(int ci) {
     const AICar& c = CARS[ci];
-    return CM[c.model].name + ", " + (c.taxi ? std::string("ЖЁЛТЫЙ") : std::string(colorName(c.paint)));
+    return carTitle(c.model) + ", " + (c.taxi ? std::string("ЖЁЛТЫЙ") : std::string(colorName(c.paint)));
 }
 static int spawnCrashCar(int edge, int dir, int lane, float s, float lat, float yawOff) {
     const Edge& e = EDGES[edge];
@@ -54280,7 +54294,7 @@ static void demandStop() {
     gDemandCooldown = 2.0f;
     bool parked = fabsf(PL.speed) < 1.5f;
     if (parked) { sfx(SFX_WHISTLE, 0.7f); subtitle("ИНСПЕКТОР ПОКАЗЫВАЕТ ЖЕЗЛОМ: К ОБОЧИНЕ!"); }
-    else { sfx(SFX_SPEECH, 0.9f, 115, 0, 1.6f); subtitle(fmt("«ВОДИТЕЛЬ %s %s, ПРИЖМИТЕСЬ К ОБОЧИНЕ!»", CM[c.model].name.c_str(), c.plateStr.c_str())); }
+    else { sfx(SFX_SPEECH, 0.9f, 115, 0, 1.6f); subtitle(fmt("«ВОДИТЕЛЬ %s %s, ПРИЖМИТЕСЬ К ОБОЧИНЕ!»", carTitle(c.model).c_str(), c.plateStr.c_str())); }
     c.demands++; c.reactT = 1.3f;
 }
 
@@ -54435,7 +54449,7 @@ static void spawnWanted() {
     AICar& c = CARS[idx];
     c.wanted = true;
     SHF.wantedCar = idx;
-    SHF.wantedDesc = fmt("%s, %s, %s %d", CM[c.model].name.c_str(), colorName(c.paint), c.plateStr.c_str(), c.region);
+    SHF.wantedDesc = fmt("%s, %s, %s %d", carTitle(c.model).c_str(), colorName(c.paint), c.plateStr.c_str(), c.region);
     toast("ОРИЕНТИРОВКА: РАЗЫСКИВАЕТСЯ " + SHF.wantedDesc, 3, 7);
     sfx(SFX_RADIO, 0.7f, 0, 0, 2.0f);
 }
@@ -54583,7 +54597,7 @@ static void startIntercept(int pi) {
         c.wanted = true;
         gIcpt.active = true; gIcpt.idx = idx; gIcpt.id = c.id; gIcpt.post = pi; gIcpt.done = false;
         SHF.wantedCar = idx;
-        SHF.wantedDesc = fmt("%s, %s, %s %d", CM[c.model].name.c_str(), colorName(c.paint), c.plateStr.c_str(), c.region);
+        SHF.wantedDesc = fmt("%s, %s, %s %d", carTitle(c.model).c_str(), colorName(c.paint), c.plateStr.c_str(), c.region);
         toast("РАЦИЯ: К ВАШЕМУ ПОСТУ ДВИЖЕТСЯ РАЗЫСКИВАЕМЫЙ: " + SHF.wantedDesc + ". ПЕРЕХВАТИТЬ!", 3, 8);
         sfx(SFX_RADIO, 0.8f, 0, 0, 2.2f);
         return;
@@ -54742,10 +54756,20 @@ static void updateDrive(float dt) {
     int stoppedNear = -1;
     for (size_t i = 0; i < CARS.size(); i++) {
         AICar& c = CARS[i];
-        if (!c.alive || c.mode != CMODE_STOPPED || c.caseIdx < 0) continue;
+        if (!c.alive || (c.mode != CMODE_STOPPED && c.mode != CMODE_PULLOVER) || c.caseIdx < 0 || c.caught || (int)i == gChaseCar) continue;
         float d = dist2d(c.pos, PL.pos);
-        if (d < 16) stoppedNear = (int)i;
-        if (d > 130) { c.modeT += 0; if (c.modeT > 30) { c.mode = CMODE_LEAVE; c.modeT = 0; c.caseIdx = -1; c.checked = true; addRep(-1); toast("ВОДИТЕЛЬ НЕ ДОЖДАЛСЯ И УЕХАЛ. -1 РЕП.", 2); } }
+        if (d < 16 && c.mode == CMODE_STOPPED) stoppedNear = (int)i;
+        // инспектор уехал: водитель ждёт недолго и уезжает сам
+        // «уехал» — отдалился от места, где был, когда машина встала (она могла встать и далеко от поста)
+        if (c.mode == CMODE_STOPPED && c.stopD <= 0) c.stopD = std::max(1.f, d);
+        float awayLim = c.mode == CMODE_STOPPED ? std::max(45.f, c.stopD + 30) : 160.f;
+        if (d > awayLim) c.awayT += dt; else c.awayT = std::max(0.f, c.awayT - dt * 2);
+        if (c.awayT > (d > awayLim + 80 ? 5.f : 10.f)) {
+            bool wanted = c.wanted || CASES[c.caseIdx].wanted;
+            c.mode = CMODE_LEAVE; c.modeT = 0; c.caseIdx = -1; c.awayT = 0; c.stopD = 0; c.blink = 0;
+            if (wanted) { addRep(-3); toast("РАЗЫСКИВАЕМЫЙ НЕ СТАЛ ЖДАТЬ И УЕХАЛ! ОРИЕНТИРОВКА В СИЛЕ. -3 РЕП.", 2, 4); }
+            else { c.checked = true; addRep(-1); toast("ВОДИТЕЛЬ НЕ ДОЖДАЛСЯ И УЕХАЛ. -1 РЕП.", 2); }
+        }
     }
     gInspect = stoppedNear;
     // ориентировка
@@ -55435,7 +55459,7 @@ static void drawDocs(float dt) {
     float W = SW - mx * 2;
     // верхняя строка
     panel(mx, mt, W, u * 20, C_DARK);
-    std::string top = fmt("СЕГОДНЯ: %s    АВТОМОБИЛЬ: %s, %s, %s %d", dateStr(TODAY()).c_str(), CM[car.model].name.c_str(), car.taxi ? "ЖЁЛТЫЙ" : colorName(car.paint), car.plateStr.c_str(), car.region);
+    std::string top = fmt("СЕГОДНЯ: %s    АВТОМОБИЛЬ: %s, %s, %s %d", dateStr(TODAY()).c_str(), carTitle(car.model).c_str(), car.taxi ? "ЖЁЛТЫЙ" : colorName(car.paint), car.plateStr.c_str(), car.region);
     UI.text(mx + u * 6, mt + u * 6, top.c_str(), u * 1.05f, C_WHITE);
     float y0 = mt + u * 24;
     float colW = W * 0.25f;
@@ -55978,6 +56002,7 @@ static void drawGarage(float dt) {
     const PatrolSpec& ps = PATROL[gGarageSel];
     float iy = SH * 0.76f;
     UI.text(SW * 0.3f, iy, ps.name, u * 1.8f, C_WHITE, 1, true);
+    UI.text(SW * 0.3f, iy + u * 39, carTitle(ps.model).c_str(), u * 0.95f, C_YELLOW, 1, true);
     UI.text(SW * 0.3f, iy + u * 17, ps.desc, u * 0.85f, C_LIGHT, 1, true);
     UI.text(SW * 0.3f, iy + u * 28, fmt("МАКС. %d КМ/Ч    МАССА %.1f", (int)(ps.vmax * (1 + 0.07f * SV.upg[U_ENGINE])), ps.mass).c_str(), u * 0.9f, RGBA(150, 200, 255), 1, true);
     // список машин
