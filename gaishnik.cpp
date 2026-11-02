@@ -318,6 +318,11 @@ static const char* PLATE_LETTERS[12] = {"А", "В", "Е", "К", "М", "Н", "О"
 static std::string randomPlate(Rng& r, int& region) {
     static const int regions[] = {66, 96, 196, 74, 174, 72, 45, 59, 159, 77, 50, 102, 116, 63, 55};
     region = regions[r.i(15)];
+    if (r.chance(0.04f)) {   // изредка — «блатной» номер: одинаковые буквы и красивые цифры
+        static const char* nice[] = {"777", "001", "007", "100", "111", "555", "999", "123", "888", "666"};
+        const char* L = PLATE_LETTERS[r.i(12)];
+        return std::string(L) + nice[r.i(10)] + L + L;
+    }
     return std::string(PLATE_LETTERS[r.i(12)]) + fmt("%d%d%d", r.i(10), r.i(10), 1 + r.i(9)) + PLATE_LETTERS[r.i(12)] + PLATE_LETTERS[r.i(12)];
 }
 static void platePixels(int slot, const std::string& main, int region, bool police) {
@@ -48270,6 +48275,44 @@ static const uint16_t HIDDEN_32[] = {
     4781,4782,4783,4784,4785,4786};
 static const HiddenList HIDDEN_TRIS[33] = {{467, HIDDEN_0}, {101, HIDDEN_1}, {116, HIDDEN_2}, {41, HIDDEN_3}, {354, HIDDEN_4}, {445, HIDDEN_5}, {142, HIDDEN_6}, {345, HIDDEN_7}, {631, HIDDEN_8}, {5, HIDDEN_9}, {191, HIDDEN_10}, {45, HIDDEN_11}, {30, HIDDEN_12}, {125, HIDDEN_13}, {75, HIDDEN_14}, {149, HIDDEN_15}, {93, HIDDEN_16}, {376, HIDDEN_17}, {64, HIDDEN_18}, {41, HIDDEN_19}, {380, HIDDEN_20}, {59, HIDDEN_21}, {118, HIDDEN_22}, {78, HIDDEN_23}, {457, HIDDEN_24}, {216, HIDDEN_25}, {65, HIDDEN_26}, {203, HIDDEN_27}, {197, HIDDEN_28}, {78, HIDDEN_29}, {67, HIDDEN_30}, {98, HIDDEN_31}, {78, HIDDEN_32}};
 static const int HIDDEN_N = 33;
+// ---- Места номеров (центр y, z и наклон dz/dy) спереди и сзади — найдены по форме кузова ----
+struct PlatePos { float fy, fz, ft, ry, rz, rt; };
+static const PlatePos PLATE_POS[33] = {
+    {0.390f, 2.430f, 0.103f, 0.590f, -2.454f, 0.032f},   // СЕДАН
+    {0.420f, 1.871f, -0.011f, 0.640f, -1.814f, 0.117f},   // ХЭТЧБЕК
+    {0.450f, 2.403f, 0.092f, 0.790f, -2.267f, 0.238f},   // УНИВЕРСАЛ
+    {0.330f, 2.467f, -0.125f, 0.620f, -2.455f, 0.301f},   // КРОССОВЕР
+    {0.720f, 2.470f, -0.109f, 0.700f, -2.388f, -0.175f},   // ВНЕДОРОЖНИК
+    {0.520f, 2.483f, 0.011f, 1.040f, -2.422f, 0.272f},   // МИКРОАВТОБУС
+    {0.530f, 2.307f, 0.146f, 0.990f, -2.219f, 0.030f},   // СТАРЫЙ ДЖИП
+    {0.570f, 2.933f, 0.302f, 0.880f, -2.844f, -0.506f},   // ПИКАП
+    {0.330f, 2.384f, 0.160f, 0.520f, -2.400f, 0.098f},   // МОЩНЫЙ СЕДАН
+    {0.440f, 2.388f, -0.135f, 0.540f, -2.383f, -0.022f},   // СТАРЫЙ СЕДАН
+    {0.380f, 2.229f, -0.013f, 0.610f, -2.216f, 0.029f},   // СПОРТКАР
+    {0.290f, 2.106f, -0.188f, 0.620f, -2.220f, -0.031f},   // СУПЕРКАР
+    {0.440f, 2.251f, -0.100f, 0.460f, -2.240f, 0.210f},   // ХЭТЧБЕК
+    {0.400f, 2.467f, 0.000f, 0.620f, -2.444f, 0.165f},   // СЕДАН
+    {0.320f, 2.143f, 0.247f, 0.620f, -2.084f, 0.171f},   // КУПЕ
+    {0.480f, 2.361f, -0.034f, 0.580f, -2.333f, 0.252f},   // КУПЕ ГТ
+    {0.450f, 2.383f, 0.078f, 0.470f, -2.293f, 0.140f},   // СТАРЫЙ МИНИВЭН
+    {0.360f, 2.052f, -0.003f, 0.620f, -2.306f, 0.233f},   // СПОРТКУПЕ
+    {0.470f, 2.294f, 0.116f, 0.960f, -2.229f, 0.182f},   // КРОССОВЕР
+    {0.440f, 2.387f, 0.120f, 0.760f, -2.287f, 0.244f},   // УНИВЕРСАЛ
+    {0.520f, 2.402f, 0.210f, 0.620f, -2.441f, -0.109f},   // БОЛЬШОЙ ВНЕДОРОЖНИК
+    {0.380f, 2.151f, 0.073f, 0.620f, -2.160f, 0.077f},   // РАЛЛИ-СЕДАН
+    {0.570f, 2.511f, -0.188f, 0.580f, -2.487f, 0.252f},   // ПАРКЕТНИК
+    {0.330f, 2.135f, 0.015f, 0.830f, -2.067f, 0.276f},   // ХЭТЧБЕК
+    {0.330f, 2.518f, 0.035f, 0.660f, -2.192f, 0.314f},   // ФАСТБЭК
+    {0.410f, 2.267f, 0.035f, 0.620f, -2.261f, 0.136f},   // ВНЕДОРОЖНИК
+    {0.400f, 1.928f, 0.010f, 0.620f, -1.868f, 0.323f},   // МИНИ
+    {0.450f, 2.496f, 0.062f, 0.590f, -2.439f, 0.313f},   // ЭЛЕКТРОСЕДАН
+    {0.360f, 2.222f, 0.000f, 0.520f, -2.219f, 0.054f},   // СТАРОЕ КУПЕ
+    {0.380f, 2.229f, -0.023f, 0.620f, -2.234f, 0.258f},   // ТРЕКОВЫЙ СПОРТКАР
+    {0.450f, 2.024f, -0.012f, 0.620f, -1.993f, 0.175f},   // ХОТ-ХЭТЧ
+    {0.270f, 2.384f, -0.083f, 0.760f, -2.355f, 0.079f},   // РАЛЛИЙНАЯ
+    {0.390f, 2.155f, -0.106f, 0.580f, -2.092f, 0.233f},   // СУПЕРКАР
+};
+static const int PLATE_POS_N = 33;
 // ---- Гудок патрульной машины: запись (только «кряки»), 22050 Гц, 16 бит моно ----
 static const int HORN_PCM_RATE = 22050;
 static const char* HORN_PCM_B64 =
@@ -48885,7 +48928,7 @@ struct CarModel {
     std::vector<MatEntry> mats;
     std::vector<WheelDef> wheels;
     float halfW = 0.9f, height = 1.4f, halfL = 2.3f, minZ = -2.3f, maxZ = 2.3f;
-    V3 plateF, plateR; float plateScale = 1;
+    V3 plateF, plateR; float plateScale = 1; float plateFT = 0, plateRT = 0;   // наклон номера dz/dy (по бамперу/крышке)
     V3 headL, tailL;           // левая фара/фонарь (x>0 — зеркалим)
     V3 exhaust;
     float roofY = 1.4f, doorX = 0.9f, doorZ = 0.2f, doorY = 0.6f;
@@ -49846,8 +49889,9 @@ static void drawCarModel(int mi, const DrawCar& d) {
             float pw = 0.26f, ph = 0.06f;
             Col pc(1, 1, 1);
             float pe = d.headOn ? 0.5f : 0;
-            if (M.plateF.y > 0) bodyDecal(rot, d.pos, M.plateF, V3(-pw, 0, 0), V3(0, ph, 0), plateUV(d.plate, 0, 0), plateUV(d.plate, 1, 0), plateUV(d.plate, 1, 1), plateUV(d.plate, 0, 1), pc, -0.15f, pe);
-            if (M.plateR.y > 0) bodyDecal(rot, d.pos, M.plateR, V3(pw, 0, 0), V3(0, ph, 0), plateUV(d.plate, 0, 0), plateUV(d.plate, 1, 0), plateUV(d.plate, 1, 1), plateUV(d.plate, 0, 1), pc, -0.15f, pe);
+            V3 upF = norm(V3(0, 1, M.plateFT)) * ph, upR = norm(V3(0, 1, M.plateRT)) * ph;
+            if (M.plateF.y > 0) bodyDecal(rot, d.pos, M.plateF, V3(-pw, 0, 0), upF, plateUV(d.plate, 0, 0), plateUV(d.plate, 1, 0), plateUV(d.plate, 1, 1), plateUV(d.plate, 0, 1), pc, -0.15f, pe);
+            if (M.plateR.y > 0) bodyDecal(rot, d.pos, M.plateR, V3(pw, 0, 0), upR, plateUV(d.plate, 0, 0), plateUV(d.plate, 1, 0), plateUV(d.plate, 1, 1), plateUV(d.plate, 0, 1), pc, -0.15f, pe);
         }
         // ливрея ДПС
         if (d.police && M.procStripe && dist < 160 && M.sideZ.size() >= 2) {
@@ -50139,7 +50183,11 @@ static void loadAllModels() {
     for (int i = 0; i < n; i++) {
         loadEmbeddedModel(CAR_MODELS_SRC[i]);
         if (gBakeMode) continue;
-        if (i < HIDDEN_N) dropTris(CM.back().lod[0], HIDDEN_TRIS[i].idx, HIDDEN_TRIS[i].n);   // внутренние грани: в z-буфере их не видно, а при сортировке они «просвечивают»
+        if (i < HIDDEN_N) dropTris(CM.back().lod[0], HIDDEN_TRIS[i].idx, HIDDEN_TRIS[i].n);
+        if (i < PLATE_POS_N) {   // номер по центру бампера/крышки, по форме кузова (как в России: 520×112 мм)
+            const PlatePos& P = PLATE_POS[i]; CarModel& M = CM.back();
+            M.plateF = V3(0, P.fy, P.fz); M.plateFT = P.ft; M.plateR = V3(0, P.ry, P.rz); M.plateRT = P.rt;
+        }   // внутренние грани: в z-буфере их не видно, а при сортировке они «просвечивают»
         cleanArches(CM.back());
     }
     buildMinibus(); buildTruck(); buildTractor(); buildTrailer();
@@ -52036,8 +52084,28 @@ struct Save {
     // настройки управления
     float steerMul = 1.0f, gripMul = 1.0f, steerSpd = 1.0f;
     bool laneAssist = false, tilt = false, tiltInv = false; float tiltSens = 1.0f;
+    int plate = 0, platesOwned = 1;   // номер патрульной машины (индекс в PLATE_SHOP) и купленные номера
 };
 static Save SV;
+// красивые номера для патрульной машины (полицейский формат: буква, 4 цифры, регион)
+struct PlateOffer { const char* num; int region; int price; int rank; const char* tag; };
+static const PlateOffer PLATE_SHOP[] = {
+    {"А0166", 66, 0, 0, "ВЫДАН НА СЛУЖБЕ"},
+    {"А1234", 66, 25000, 0, "ПО ПОРЯДКУ"},
+    {"А2020", 96, 30000, 0, "ГОД"},
+    {"А0505", 196, 35000, 1, "ЗЕРКАЛЬНЫЙ"},
+    {"А0066", 66, 45000, 1, "РЕГИОН"},
+    {"А1111", 66, 60000, 2, "ЕДИНИЦЫ"},
+    {"А0100", 96, 70000, 2, "СОТКА"},
+    {"А0777", 66, 85000, 3, "ТРИ СЕМЁРКИ"},
+    {"А7777", 196, 100000, 4, "ЧЕТЫРЕ СЕМЁРКИ"},
+    {"А0007", 66, 140000, 5, "АГЕНТ"},
+    {"А0001", 66, 250000, 7, "ПЕРВЫЙ НОМЕР"}};
+static const int PLATE_SHOP_N = sizeof(PLATE_SHOP) / sizeof(PLATE_SHOP[0]);
+static void applyPlayerPlate(int idx) {
+    if (idx < 0 || idx >= PLATE_SHOP_N) idx = 0;
+    platePixels(2, PLATE_SHOP[idx].num, PLATE_SHOP[idx].region, true);
+}
 
 // ---------------------------------------------------------------------
 //  Игрок
@@ -54032,7 +54100,7 @@ static void saveGame() {
     fprintf(f, "money %d\nrep %d\nday %d\nowned %d\ncar %d\n", SV.money, SV.rep, SV.day, SV.carOwned, SV.car);
     for (int i = 0; i < U_COUNT; i++) fprintf(f, "upg%d %d\n", i, SV.upg[i]);
     fprintf(f, "complaints %d\nchecks %d\nfines %d\ndetain %d\nchases %d\ncorrect %d\nwrong %d\n", SV.complaints, SV.totalChecks, SV.totalFines, SV.totalDetain, SV.totalChases, SV.totalCorrect, SV.totalWrong);
-    fprintf(f, "fuel %d\n", (int)(SV.fuel * 10));
+    fprintf(f, "fuel %d\nplate %d\nplates %d\n", (int)(SV.fuel * 10), SV.plate, SV.platesOwned);
     fprintf(f, "sound %d\ncamview %d\ndistrict %d\ntutorial %d\n", SV.sound ? 1 : 0, SV.camView, SV.lastDistrict, SV.tutorialShown ? 1 : 0);
     fprintf(f, "steermul %d\ngripmul %d\nsteerspd %d\nassist %d\ntilt %d\ntiltinv %d\ntiltsens %d\n", (int)(SV.steerMul * 100), (int)(SV.gripMul * 100), (int)(SV.steerSpd * 100), SV.laneAssist ? 1 : 0, SV.tilt ? 1 : 0, SV.tiltInv ? 1 : 0, (int)(SV.tiltSens * 100));
     for (const Camera_& c : SPEEDCAMS) fprintf(f, "cam %d %d %.1f\n", c.edge, c.dir, c.s);
@@ -54053,6 +54121,8 @@ static void loadGame() {
         else if (!strcmp(key, "detain")) SV.totalDetain = v; else if (!strcmp(key, "chases")) SV.totalChases = v; else if (!strcmp(key, "correct")) SV.totalCorrect = v;
         else if (!strcmp(key, "wrong")) SV.totalWrong = v; else if (!strcmp(key, "sound")) SV.sound = v != 0; else if (!strcmp(key, "camview")) SV.camView = v;
         else if (!strcmp(key, "fuel")) SV.fuel = clampf(v / 10.f, 0, 60);
+        else if (!strcmp(key, "plate")) SV.plate = std::max(0, std::min(PLATE_SHOP_N - 1, v));
+        else if (!strcmp(key, "plates")) SV.platesOwned = v | 1;
         else if (!strcmp(key, "steermul")) SV.steerMul = clampf(v / 100.f, 0.4f, 2.0f);
         else if (!strcmp(key, "gripmul")) SV.gripMul = clampf(v / 100.f, 0.5f, 2.0f);
         else if (!strcmp(key, "steerspd")) SV.steerSpd = clampf(v / 100.f, 0.3f, 2.5f);
@@ -54064,6 +54134,7 @@ static void loadGame() {
     }
     fclose(f);
     if (!(SV.carOwned & (1 << SV.car))) SV.car = 0;
+    if (!((SV.platesOwned >> SV.plate) & 1)) SV.plate = 0;
 }
 
 // ---------------------------------------------------------------------
@@ -54100,7 +54171,7 @@ static void startShift() {
     // начальный трафик
     gClockMin = SHF.minutes;
     { int n0 = (int)clampf(24 * trafficLevelAt(PL.pos), 8, 40); for (int i = 0; i < n0; i++) spawnTrafficCar(PL.pos, 40, 380, false); }
-    platePixels(2, "А0166", 66, true); platePixels(3, "А0266", 66, true);
+    applyPlayerPlate(SV.plate); platePixels(3, "А0266", 66, true);
     partnerInitShift();
     gScreen = SC_DRIVE;
     toast(fmt("СМЕНА НАЧАЛАСЬ. УЧАСТОК: %s. ТРАФИК %s — ДОХОД X%.2f", DISTRICT_NAMES[SHF.district], trafficName(trafficLevelAt(PL.pos)), payMulAt(PL.pos)), 0, 5);
@@ -55861,7 +55932,18 @@ static void drawMap() {
 // ---------------------------------------------------------------------
 //  Гараж
 // ---------------------------------------------------------------------
-static int gGarageSel = 0; static float gGarageRot = 0;
+static int gGarageSel = 0; static float gGarageRot = 0; static int gGarageTab = 0, gPlateSel = 0;
+// номер в интерфейсе: синяя полицейская табличка
+static void drawPlateUI(float x, float y, float w, const PlateOffer& o) {
+    float h = w * 0.215f, u = U();
+    UI.roundRect(x, y, w, h, h * 0.12f, RGBA(15, 15, 15));
+    UI.roundRect(x + h * 0.06f, y + h * 0.06f, w - h * 0.12f, h * 0.88f, h * 0.1f, RGBA(30, 70, 170));
+    float sx = x + w * 0.78f;
+    UI.rect(sx, y + h * 0.1f, std::max(1.f, u * 0.3f), h * 0.8f, C_WHITE);
+    UI.text(x + w * 0.39f, y + h * 0.2f, o.num, h * 0.068f * 9.5f / 9.5f, C_WHITE, 1, true);
+    UI.text(sx + w * 0.11f, y + h * 0.1f, fmt("%d", o.region).c_str(), h * 0.042f * 9.5f / 9.5f, C_WHITE, 1, true);
+    UI.text(sx + w * 0.11f, y + h * 0.62f, "RUS", h * 0.022f * 9.5f / 9.5f, C_WHITE, 1);
+}
 static void drawGarage(float dt) {
     float u = U();
     gGarageRot += dt * 0.5f;
@@ -55901,6 +55983,43 @@ static void drawGarage(float dt) {
     // список машин
     float px = SW * 0.58f, pw = SW - px - mx;
     float y = mt;
+    // вкладки: машины / номера
+    {
+        float tw = (pw - u * 3) * 0.5f;
+        if (button(px, y, tw, u * 16, "МАШИНЫ", gGarageTab == 0 ? C_BLUE : C_GRAY, u * 0.9f)) { gGarageTab = 0; applyPlayerPlate(SV.plate); }
+        if (button(px + tw + u * 3, y, tw, u * 16, "НОМЕРА", gGarageTab == 1 ? C_BLUE : C_GRAY, u * 0.9f)) { gGarageTab = 1; gPlateSel = SV.plate; }
+        y += u * 20;
+    }
+    if (gGarageTab == 1) {
+        // красивые номера: превью на машине — выбранный в списке
+        applyPlayerPlate(gPlateSel);
+        float cw2 = (pw - u * 3) * 0.5f, bh = u * 22;
+        for (int k = 0; k < PLATE_SHOP_N; k++) {
+            const PlateOffer& o = PLATE_SHOP[k];
+            bool owned = (SV.platesOwned >> k) & 1;
+            float bx = px + (k % 2) * (cw2 + u * 3), by = y + (k / 2) * (bh + u * 2);
+            if (button(bx, by, cw2, bh, "", k == gPlateSel ? C_BLUE : C_GRAY, u * 0.8f)) gPlateSel = k;
+            drawPlateUI(bx + u * 3, by + u * 3, cw2 * 0.5f, o);
+            std::string sub = owned ? (SV.plate == k ? "НА МАШИНЕ" : "КУПЛЕН") : fmt("%d ₽", o.price);
+            SDL_Color sc = owned ? RGBA(140, 230, 150) : (rankOf(SV.rep) >= o.rank ? C_YELLOW : RGBA(255, 140, 130));
+            UI.text(bx + cw2 * 0.77f, by + u * 3, sub.c_str(), u * 0.7f, sc, 1);
+            UI.text(bx + cw2 * 0.77f, by + u * 12, o.tag, u * 0.55f, RGBA(170, 180, 195), 1);
+        }
+        y += ((PLATE_SHOP_N + 1) / 2) * (bh + u * 2) + u * 4;
+        const PlateOffer& o = PLATE_SHOP[gPlateSel];
+        bool owned = (SV.platesOwned >> gPlateSel) & 1;
+        if (owned) {
+            if (SV.plate != gPlateSel) { if (button(px, y, pw, u * 20, "ПОСТАВИТЬ НА МАШИНУ", C_GREEN, u * 1.0f)) { SV.plate = gPlateSel; sfx(SFX_CLICK); saveGame(); } }
+            else UI.text(px + pw / 2, y + u * 6, "ЭТОТ НОМЕР УЖЕ НА ПАТРУЛЬНОЙ МАШИНЕ", u * 0.85f, RGBA(140, 230, 150), 1);
+        } else if (rankOf(SV.rep) < o.rank) UI.text(px + pw / 2, y + u * 6, fmt("НУЖНО ЗВАНИЕ: %s", RANKS[o.rank]).c_str(), u * 0.9f, RGBA(255, 130, 120), 1);
+        else if (button(px, y, pw, u * 20, fmt("КУПИТЬ ЗА %d ₽", o.price).c_str(), C_GREEN, u * 1.0f, SV.money >= o.price)) {
+            SV.money -= o.price; SV.platesOwned |= 1 << gPlateSel; SV.plate = gPlateSel; sfx(SFX_COIN); saveGame();
+        }
+        y += u * 26;
+        UI.text(px, y, "НОМЕР ОДИН НА ВСЕ МАШИНЫ ГАРАЖА.", u * 0.7f, RGBA(150, 160, 175));
+        if (button(mx, SH - mt - u * 24, u * 90, u * 24, "НАЗАД", C_GRAY, u * 1.2f) || gBackPressed) { gBackPressed = false; applyPlayerPlate(SV.plate); gScreen = SC_MENU; }
+        return;
+    }
     {   // две колонки по 4 машины
         float cw2 = (pw - u * 3) * 0.5f;
         for (int k = 0; k < PATROL_N; k++) {
@@ -56343,6 +56462,7 @@ int main(int argc, char** argv) {
     CAR_CULL = -1;
     buildRoads(); buildScenery();
     for (int i = 0; i < 4; i++) platePixels(i, i < 2 ? "А000АА" : "А0166", 66, i >= 2);
+    applyPlayerPlate(SV.plate);
     // путь сохранения
 #ifdef __ANDROID__
     const char* ip = SDL_AndroidGetInternalStoragePath();
