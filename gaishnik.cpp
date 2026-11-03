@@ -65945,12 +65945,12 @@ static float fleeTopSpeed(const AICar& c, bool city) {
     else if (m == MD_OLDSEDAN || m == MD_OLDCOUPE || m == MD_MINI || m == MD_HATCH || m == MD_HATCH2 || m == MD_HATCH3) { kmh = 185; ckmh = 118; }
     else { kmh = 205; ckmh = 125; }
     float var = 0.94f + (c.id % 13) * 0.01f;   // у каждого водителя немного своя манера
-    return (city ? ckmh : kmh) / 3.6f * var * c.fleeDmg;
+    return (city ? ckmh : kmh) * 1.1f / 3.6f * var * c.fleeDmg;   // беглец выжимает из машины всё
 }
 static float fleeAccel(const AICar& c) {
     float top = fleeTopSpeed(c, false) * 3.6f;
-    if (top < 140) return 2.2f;
-    return clampf(3.0f + (top - 170) / 30.0f, 3.5f, 7.0f);
+    if (top < 150) return 3.0f;
+    return clampf(4.5f + (top - 170) / 25.0f, 4.5f, 9.0f);
 }
 // авария беглеца: занос, потеря скорости, искры; иногда — машина разбита
 static void fugitiveCrash(AICar& c, float severity) {
@@ -66185,7 +66185,7 @@ static void updateAICar(AICar& c, int idx, float dt) {
     }
     if (c.mode == CMODE_FLEE) {
         v0 = std::max(lim * 1.3f, fleeTopSpeed(c, !e.highway)); amax = fleeAccel(c); bcomf = 8; ignoreLights = true;
-        if (c.modeT < 5) amax *= 1.5f;   // рывок в начале погони
+        if (c.modeT < 6) amax *= 1.6f;   // рывок в начале погони — газ в пол
         if (c.wrecked) { v0 = 0; amax = 0.5f; }
         // перед поворотом на перекрёстке приходится тормозить
         if (!c.turning && c.planEdge >= 0) {
@@ -66580,7 +66580,7 @@ static void collidePlayerCars(float dt) {
                     if (rel > 3 && PL.hitCooldown <= 0) {
                         sfxCrash(rel / 14); PL.hitCooldown = 0.6f; gCrashFlag = rel; gLastHitCar = (int)i;
                         if (c.mode == CMODE_FLEE) {
-                            c.pressure += 1.2f + rel * 0.08f * pmass;
+                            c.pressure += 0.6f + rel * 0.04f * pmass;
                             // сильный удар в угол на скорости — беглеца разворачивает (иногда разбивает)
                             float side = fabsf(dot(n, rightOf(c.yaw)));
                             if (rel > 6 && c.speed > 12 && side > 0.35f && grng.chance(0.35f)) fugitiveCrash(c, clampf(rel / 25.0f, 0.2f, 0.8f));
@@ -68209,7 +68209,7 @@ static void updateDrive(float dt) {
                 if (c.pressure < 6) toast("БЕГЛЕЦ УПЁРСЯ В ШЛАГБАУМ ПОСТА!", 1, 3);
                 c.pressure = 99;
             }
-            if (d < 16) c.pressure += dt * (0.35f + PATROL[SV.car].mass * 0.12f);
+            if (d < 14) c.pressure += dt * (0.18f + PATROL[SV.car].mass * 0.07f) * (c.speed < 8 ? 2.0f : 1.0f);   // зажатый на малой скорости сдаётся быстрее
             if (gBlock.active && dist2d(c.pos, gBlock.pos) < 20 && c.speed < 3) c.pressure = 99;
             if (bitCount(c.flatMask) >= 2 && c.speed < 3.5f && d < 60) c.pressure += dt * 2.5f;   // на дисках далеко не уедет
             if (d > 280) gChaseFarT += dt; else gChaseFarT = std::max(0.f, gChaseFarT - dt * 0.5f);
