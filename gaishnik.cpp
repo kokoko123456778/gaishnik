@@ -171,6 +171,18 @@ static const GlyphDef GLYPHS[] = {
     {0x42D, ".###.#...#....#.####....##...#.###."}, // Э
     {0x42E, "#..#.#.#.##.#.####.##.#.##.#.##..#."}, // Ю
     {0x42F, ".#####...##...#.####..#.#.#..##...#"}, // Я
+    {0x44, "####.#...##...##...##...##...#####."}, // D (лат.)
+    {0x46, "######....#....####.#....#....#...."}, // F (лат.)
+    {0x47, ".#####....#....#.####...##...#.###."}, // G (лат.)
+    {0x49, ".###...#....#....#....#....#...###."}, // I (лат.)
+    {0x4A, "..###...#....#....#.#..#.#..#..##.."}, // J (лат.)
+    {0x4C, "#....#....#....#....#....#....#####"}, // L (лат.)
+    {0x4E, "#...###..##.#.##..###...##...##...#"}, // N (лат.)
+    {0x51, ".###.#...##...##...##.#.##..#..##.#"}, // Q (лат.)
+    {0x56, "#...##...##...##...##...#.#.#...#.."}, // V (лат.)
+    {0x57, "#...##...##...##.#.##.#.###.###...#"}, // W (лат.)
+    {0x59, "#...##...#.#.#...#....#....#....#.."}, // Y (лат.)
+    {0x5A, "#####....#...#...#...#...#....#####"}, // Z (лат.)
 };
 static const int NGLYPHS = sizeof(GLYPHS) / sizeof(GLYPHS[0]);
 
@@ -182,7 +194,7 @@ static int glyphIndex(uint32_t c) {
     if (c == 0x2014 || c == 0x2013) c = '-';
     if (c == 0x2022) c = '*';
     if (c >= 'a' && c <= 'z') c -= 32;
-    if (c == 'R' || c == 'U' || c == 'S') { /* есть свои глифы */ }
+    if (c == 'R' || c == 'U' || c == 'S' || c == 'D' || c == 'F' || c == 'G' || c == 'I' || c == 'J' || c == 'L' || c == 'N' || c == 'Q' || c == 'V' || c == 'W' || c == 'Y' || c == 'Z') { /* есть свои глифы */ }
     else if (c >= 'A' && c <= 'Z') {
         static const uint32_t lat[26] = {0x410, 0x412, 0x421, 0x414, 0x415, 0x424, 0x413, 0x41D, '1', 0x419, 0x41A, 0x41B, 0x41C, 0x418, 0x41E, 0x420, 0x41E, 0x42F, 0x421, 0x422, 0x426, 0x423, 0x428, 0x425, 0x423, 0x417};
         c = lat[c - 'A'];
@@ -90669,6 +90681,8 @@ struct Save {
     // настройки управления
     float steerMul = 1.0f, gripMul = 1.0f, steerSpd = 1.0f;
     bool laneAssist = false, tilt = false, tiltInv = false; float tiltSens = 1.0f;
+    // геймпад: чувствительность руля, мёртвая зона стика, курки газа/тормоза, скорость курсора, вибрация, подсветка
+    float padSteer = 1.0f, padDead = 0.12f, padTrig = 1.0f, padCursor = 1.0f; bool padRumble = true, padLed = true, padInv = false;
     int plate = 0, platesOwned = 1;   // номер патрульной машины (индекс в PLATE_SHOP) и купленные номера
 };
 static Save SV;
@@ -92411,6 +92425,21 @@ static void padOpen(int index) {
     }
 }
 static float padAxis(SDL_GameControllerAxis a) { return gPad ? SDL_GameControllerGetAxis(gPad, a) / 32767.0f : 0.f; }
+// стик -> руль: мёртвая зона, мягкая кривая в центре, чувствительность, инверсия
+static float padStickToSteer(float sx) {
+    if (SV.padInv) sx = -sx;
+    float a = fabsf(sx), dz = SV.padDead;
+    if (a <= dz) return 0;
+    float v = clampf((a - dz) / std::max(0.05f, 1 - dz), 0, 1);
+    v = clampf(v * (0.45f + 0.55f * v) * SV.padSteer, 0, 1);
+    return sx > 0 ? v : -v;
+}
+// курок -> педаль: чувствительность > 100% — сильнее при лёгком нажатии
+static float padTrigger(float t) {
+    if (t <= 0.04f) return 0;
+    float v = clampf((t - 0.04f) / 0.96f, 0, 1);
+    return clampf(powf(v, 1.0f / SV.padTrig), 0, 1);
+}
 static bool padBtn(SDL_GameControllerButton b) { return gPad && SDL_GameControllerGetButton(gPad, b); }
 static void padTapAt(float x, float y) { TAPS.push_back({x, y, false}); }
 static void padRumble(float lo, float hi, int ms) {
@@ -92927,6 +92956,7 @@ static void saveGame() {
     fprintf(f, "fuel %d\nplate %d\nplates %d\n", (int)(SV.fuel * 10), SV.plate, SV.platesOwned);
     fprintf(f, "sound %d\ncamview %d\ndistrict %d\ntutorial %d\n", SV.sound ? 1 : 0, SV.camView, SV.lastDistrict, SV.tutorialShown ? 1 : 0);
     fprintf(f, "steermul %d\ngripmul %d\nsteerspd %d\nassist %d\ntilt %d\ntiltinv %d\ntiltsens %d\n", (int)(SV.steerMul * 100), (int)(SV.gripMul * 100), (int)(SV.steerSpd * 100), SV.laneAssist ? 1 : 0, SV.tilt ? 1 : 0, SV.tiltInv ? 1 : 0, (int)(SV.tiltSens * 100));
+    fprintf(f, "padsteer %d\npaddead %d\npadtrig %d\npadcursor %d\npadrumble %d\npadled %d\npadinv %d\n", (int)(SV.padSteer * 100 + 0.5f), (int)(SV.padDead * 100 + 0.5f), (int)(SV.padTrig * 100 + 0.5f), (int)(SV.padCursor * 100 + 0.5f), SV.padRumble ? 1 : 0, SV.padLed ? 1 : 0, SV.padInv ? 1 : 0);
     for (const Camera_& c : SPEEDCAMS) fprintf(f, "cam %d %d %.1f\n", c.edge, c.dir, c.s);
     fclose(f);
 }
@@ -92954,6 +92984,13 @@ static void loadGame() {
         else if (!strcmp(key, "assist")) SV.laneAssist = v != 0;
         else if (!strcmp(key, "tilt")) SV.tilt = v != 0;
         else if (!strcmp(key, "tiltinv")) SV.tiltInv = v != 0;
+        else if (!strcmp(key, "padsteer")) SV.padSteer = clampf(v / 100.f, 0.3f, 2.5f);
+        else if (!strcmp(key, "paddead")) SV.padDead = clampf(v / 100.f, 0.0f, 0.4f);
+        else if (!strcmp(key, "padtrig")) SV.padTrig = clampf(v / 100.f, 0.3f, 2.5f);
+        else if (!strcmp(key, "padcursor")) SV.padCursor = clampf(v / 100.f, 0.3f, 3.0f);
+        else if (!strcmp(key, "padrumble")) SV.padRumble = v != 0;
+        else if (!strcmp(key, "padled")) SV.padLed = v != 0;
+        else if (!strcmp(key, "padinv")) SV.padInv = v != 0;
         else if (!strcmp(key, "district")) SV.lastDistrict = std::max(0, std::min(3, v)); else if (!strcmp(key, "tutorial")) SV.tutorialShown = v != 0;
     }
     fclose(f);
@@ -94300,7 +94337,7 @@ static void drawCockpitOverlay() {
         if (onR) {
             int sec = gRadioPcm.empty() ? 0 : (int)(gRadioPos / gRadioRate), tot = RADIO_SAMPLES / RADIO_RATE;
             // название бегущей строкой
-            std::string title = "МАКАН - АСФАЛЬТ 8     ";
+            std::string title = "MACAN - ASPHALT 8     ";
             std::vector<uint32_t> cps = utf8Decode(title.c_str());
             int nc = (int)cps.size(), shift = (int)(gTime * 4) % nc;
             std::string vis;
@@ -94332,7 +94369,7 @@ static void drawCockpitOverlay() {
             if (gAudio) SDL_LockAudioDevice(gAudio);
             gRadioOn = !gRadioOn;
             if (gAudio) SDL_UnlockAudioDevice(gAudio);
-            toast(gRadioOn ? "РАДИО: МАКАН - АСФАЛЬТ 8" : "РАДИО: ПАУЗА", 0, 1.6f);
+            toast(gRadioOn ? "РАДИО: MACAN - ASPHALT 8" : "РАДИО: ПАУЗА", 0, 1.6f);
         }
     }
 
@@ -95200,6 +95237,51 @@ static float accelSteer() {
     if (fabsf(s) < 0.06f) s = 0;
     return clampf(s, -1, 1);
 }
+// вкладка «Геймпад»: ползунки, переключатели, живой индикатор стика и курков
+static void drawPadSettings(float mx, float mt, float W, float H) {
+    float u = U();
+    float sx = mx + u * 10, sw = W * 0.55f - u * 20, sh = u * 10, sy = mt + u * 46;
+    SV.padSteer = slider(sx, sy, sw, sh, "ЧУВСТВИТЕЛЬНОСТЬ РУЛЯ (ЛЕВЫЙ СТИК)", fmt("%d%%", (int)(SV.padSteer * 100 + 0.5f)), SV.padSteer, 0.4f, 2.0f); sy += u * 30;
+    SV.padDead = slider(sx, sy, sw, sh, "МЁРТВАЯ ЗОНА СТИКА (ОТ ДРЕЙФА)", fmt("%d%%", (int)(SV.padDead * 100 + 0.5f)), SV.padDead, 0.0f, 0.35f); sy += u * 30;
+    SV.padTrig = slider(sx, sy, sw, sh, "ЧУВСТВИТЕЛЬНОСТЬ ГАЗА И ТОРМОЗА (R2/L2)", fmt("%d%%", (int)(SV.padTrig * 100 + 0.5f)), SV.padTrig, 0.4f, 2.0f); sy += u * 30;
+    SV.padCursor = slider(sx, sy, sw, sh, "СКОРОСТЬ КУРСОРА", fmt("%d%%", (int)(SV.padCursor * 100 + 0.5f)), SV.padCursor, 0.4f, 2.5f); sy += u * 30;
+    float tx = mx + W * 0.58f, tw = W * 0.42f - u * 10, ty = mt + u * 28, th = u * 20;
+    if (button(tx, ty, tw, th, SV.padRumble ? "ВИБРАЦИЯ: ВКЛ" : "ВИБРАЦИЯ: ВЫКЛ", SV.padRumble ? C_GREEN : C_GRAY, u * 0.95f)) { SV.padRumble = !SV.padRumble; if (SV.padRumble) padRumble(0.5f, 0.3f, 200); }
+    ty += th + u * 4;
+    if (button(tx, ty, tw, th, SV.padLed ? "ПОДСВЕТКА DUALSENSE: ВКЛ" : "ПОДСВЕТКА DUALSENSE: ВЫКЛ", SV.padLed ? C_GREEN : C_GRAY, u * 0.95f)) SV.padLed = !SV.padLed;
+    ty += th + u * 4;
+    if (button(tx, ty, tw, th, SV.padInv ? "ИНВЕРСИЯ РУЛЯ: ВКЛ" : "ИНВЕРСИЯ РУЛЯ: ВЫКЛ", C_GRAY, u * 0.95f)) SV.padInv = !SV.padInv;
+    ty += th + u * 9;
+    // живая проверка: сырое положение стика и что получит руль
+    const char* nm = gPad ? SDL_GameControllerName(gPad) : nullptr;
+    UI.text(tx, ty, gPad ? (std::string("ПОДКЛЮЧЁН: ") + (nm && strstr(nm, "DualSense") ? "DUALSENSE" : "ГЕЙМПАД")).c_str() : "ГЕЙМПАД НЕ ПОДКЛЮЧЁН", u * 0.85f, gPad ? RGBA(120, 230, 140) : C_YELLOW);
+    ty += u * 12;
+    float raw = padAxis(SDL_CONTROLLER_AXIS_LEFTX), out = padStickToSteer(raw);
+    auto bar = [&](float y, const char* lb, float v, bool center, SDL_Color c) {
+        UI.text(tx, y, lb, u * 0.75f, C_LIGHT);
+        float bx = tx + u * 52, bw = tw - u * 52;
+        UI.roundRect(bx, y - u * 0.5f, bw, u * 8, u * 2.5f, RGBA(40, 46, 56));
+        if (center) {
+            UI.rect(bx + bw / 2 - 1, y - u * 0.5f, 2, u * 8, C_LIGHT);
+            float x0 = bx + bw / 2, x1 = bx + bw / 2 + v * bw / 2;
+            UI.rect(std::min(x0, x1), y + u * 1.5f, fabsf(x1 - x0), u * 4, c);
+        } else UI.rect(bx + u, y + u * 1.5f, (bw - u * 2) * clampf(v, 0, 1), u * 4, c);
+    };
+    // мёртвая зона — тёмные метки на шкале стика
+    bar(ty, "СТИК", raw, true, RGBA(150, 160, 175)); {
+        float bx = tx + u * 52, bw = tw - u * 52;
+        UI.rect(bx + bw / 2 - SV.padDead * bw / 2, ty - u * 0.5f, SV.padDead * bw, u * 8, RGBA(200, 60, 60, 90));
+    }
+    ty += u * 11;
+    bar(ty, "РУЛЬ", out, true, C_YELLOW); ty += u * 11;
+    bar(ty, "ГАЗ R2", padTrigger(padAxis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT)), false, RGBA(60, 200, 90)); ty += u * 11;
+    bar(ty, "ТОРМОЗ L2", padTrigger(padAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT)), false, RGBA(220, 70, 70)); ty += u * 13;
+    UI.text(tx, ty, "СТИК ДРЕЙФУЕТ — УВЕЛИЧЬ МЁРТВУЮ ЗОНУ.", u * 0.72f, RGBA(150, 160, 175)); ty += u * 9;
+    UI.text(tx, ty, "МАШИНУ ВИЛЯЕТ — УМЕНЬШИ ЧУВСТВИТЕЛЬНОСТЬ.", u * 0.72f, RGBA(150, 160, 175));
+    if (button(mx + u * 10, mt + H - u * 32, u * 110, u * 24, "СБРОС", RGBA(110, 40, 40), u * 1.1f)) { SV.padSteer = 1; SV.padDead = 0.12f; SV.padTrig = 1; SV.padCursor = 1; SV.padRumble = true; SV.padLed = true; SV.padInv = false; }
+    if (button(mx + W - u * 130, mt + H - u * 32, u * 120, u * 24, "ГОТОВО", C_BLUE, u * 1.2f) || gBackPressed) { gBackPressed = false; saveGame(); gScreen = gSettingsReturn; }
+    SY.engVol = gSettingsReturn == SC_MENU ? 0.3f : 0; SY.siren = 0; SY.screech = 0; SY.wind = 0;
+}
 static void drawSettings(float dt) {
     float u = U();
     if (gSettingsReturn == SC_MENU) drawMenuScene(dt);
@@ -95209,6 +95291,13 @@ static void drawSettings(float dt) {
     float W = SW - 2 * mx, H = SH - 2 * mt;
     panel(mx, mt, W, H, C_DARK);
     UI.text(mx + u * 10, mt + u * 7, "НАСТРОЙКИ УПРАВЛЕНИЯ", u * 1.6f, C_WHITE);
+    static int tab = 0;
+    {   // вкладки
+        float tw2 = u * 92, tx2 = mx + W - u * 10 - tw2 * 2 - u * 4;
+        if (button(tx2, mt + u * 4, tw2, u * 17, "МАШИНА И ЭКРАН", tab == 0 ? C_BLUE : C_GRAY, u * 0.8f)) tab = 0;
+        if (button(tx2 + tw2 + u * 4, mt + u * 4, tw2, u * 17, gPad ? "ГЕЙМПАД" : "ГЕЙМПАД (НЕТ)", tab == 1 ? C_BLUE : C_GRAY, u * 0.8f)) tab = 1;
+    }
+    if (tab == 1) { drawPadSettings(mx, mt, W, H); return; }
     // готовые режимы
     float px = mx + u * 10, py = mt + u * 26, pw = (W * 0.55f - u * 26) / 4, ph = u * 20;
     struct Pre { const char* n; float s, g, sp; };
@@ -95305,9 +95394,9 @@ static void drawHelp() {
         "ПОГОНЯ: ДЕРЖИСЬ БЛИЖЕ И ТОЛКАЙ БЕГЛЕЦА, ПОКА НЕ ЗАПОЛНИТСЯ ШКАЛА. ВЫЗОВИ ПОМОЩЬ. БЛОКПОСТ — ТОЛЬКО ДЛЯ МАШИН В РОЗЫСКЕ И СТРИТРЕЙСЕРОВ. ОТСТАНЕШЬ — ПРОВАЛ. НА МОЩНОЙ МАШИНЕ БЕГЛЕЦ БЫСТРЕЕ. СИЛЬНЫЙ УДАР В УГОЛ МОЖЕТ ЕГО РАЗВЕРНУТЬ, А НА СКОРОСТИ ОН И САМ МОЖЕТ РАЗБИТЬСЯ.\n"
         "ДТП: ЕДЬ ПО СТРЕЛКЕ, ОСТАНОВИСЬ У МЕСТА И ОФОРМИ. ВИНОВНИК: ВЪЕХАЛ СЗАДИ — 12.15, ПЕРЕСТРОИЛСЯ В ДРУГУЮ МАШИНУ — 12.14, НЕ ПРОПУСТИЛ МАШИНУ СПРАВА БЕЗ СВЕТОФОРА — 12.13, ПРОЕХАЛ НА КРАСНЫЙ — 12.12. ПРОВЕРЯЙ АЛКОТЕСТЕРОМ, ВЫЗЫВАЙ СКОРУЮ.\n"
         "ПРИДИРКИ К ЧЕСТНЫМ ВОДИТЕЛЯМ ВЕДУТ К ЖАЛОБАМ И ШТРАФАМ. ЗВАНИЯ ОТКРЫВАЮТ НОВЫЕ УЧАСТКИ И МАШИНЫ.\n"
-        "ГЕЙМПАД PS5: ЛЕВЫЙ СТИК — РУЛЬ, R2 — ГАЗ, L2 — ТОРМОЗ, КРЕСТ — ТРЕБОВАТЬ/ДОКУМЕНТЫ, КРУГ — ГУДОК, КВАДРАТ — МИГАЛКА, ТРЕУГОЛЬНИК — ВИД, L1 — СЛЕДУЮЩАЯ ЦЕЛЬ, R1 — РАДИО, OPTIONS — ПАУЗА, ТАЧПАД — КАРТА, ПРАВЫЙ СТИК — КУРСОР, R3 — НАЖАТЬ. В МЕНЮ: СТИК — КУРСОР, КРЕСТ — НАЖАТЬ, КРУГ — НАЗАД.";
+        "ГЕЙМПАД PS5: СТИК — РУЛЬ, R2/L2 — ГАЗ/ТОРМОЗ, КРЕСТ — ТРЕБОВАТЬ, КРУГ — ГУДОК, КВАДРАТ — МИГАЛКА, ТРЕУГОЛЬНИК — ВИД, L1 — ЦЕЛЬ, R1 — РАДИО. ЧУВСТВИТЕЛЬНОСТЬ — В НАСТРОЙКАХ.";
     UI.textBox(mx, mt + u * 22, colW, left, u * 0.86f, C_LIGHT);
-    UI.textBox(mx + colW + u * 10, mt + u * 22, colW, right, u * 0.86f, C_LIGHT);
+    UI.textBox(mx + colW + u * 10, mt + u * 22, colW, right, u * 0.8f, C_LIGHT);
     if (button(SW / 2 - u * 60, SH - mt - u * 26, u * 120, u * 24, "ПОНЯТНО", C_BLUE, u * 1.2f) || gBackPressed) { gBackPressed = false; gScreen = gHelpReturn; }
 }
 
@@ -95428,7 +95517,7 @@ static void handleEvent(const SDL_Event& e) {
                 if (gAudio) SDL_LockAudioDevice(gAudio);
                 gRadioOn = !gRadioOn;
                 if (gAudio) SDL_UnlockAudioDevice(gAudio);
-                toast(gRadioOn ? "РАДИО: МАКАН - АСФАЛЬТ 8" : "РАДИО: ПАУЗА", 0, 1.6f);
+                toast(gRadioOn ? "РАДИО: MACAN - ASPHALT 8" : "РАДИО: ПАУЗА", 0, 1.6f);
             } else if (b == SDL_CONTROLLER_BUTTON_BACK || b == SDL_CONTROLLER_BUTTON_TOUCHPAD) {
                 gMapReturn = SC_DRIVE; gScreen = SC_MAP; TOASTS.clear();
             }
@@ -95459,7 +95548,7 @@ static void padUpdate(float dt) {
     float m = sqrtf(cx * cx + cy * cy);
     if (m > 0.18f) {
         if (gCurX < 0) { gCurX = SW * 0.5f; gCurY = SH * 0.5f; }
-        float k = (m - 0.18f) / 0.82f, sp = SH * (0.25f + 1.6f * k * k) * dt / m;
+        float k = (m - 0.18f) / 0.82f, sp = SH * (0.25f + 1.6f * k * k) * SV.padCursor * dt / m;
         gCurX = clampf(gCurX + cx * sp, 0, (float)SW - 1); gCurY = clampf(gCurY + cy * sp, 0, (float)SH - 1);
         gCurShowT = drive ? 3.f : 1e9f;
         for (Finger& f : FINGERS) if (f.id == (SDL_FingerID)-888) { f.x = gCurX; f.y = gCurY; }
@@ -95471,17 +95560,15 @@ static void padUpdate(float dt) {
         float sx = padAxis(SDL_CONTROLLER_AXIS_LEFTX);
         if (padBtn(SDL_CONTROLLER_BUTTON_DPAD_LEFT)) sx = -1;
         if (padBtn(SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) sx = 1;
-        float a = fabsf(sx);
-        if (a > 0.1f) {
-            float v = (a - 0.1f) / 0.9f; v = v * (0.45f + 0.55f * v);   // мягче в центре — точнее на скорости
-            gIn.steer = clampf(sx > 0 ? v : -v, -1, 1);
-        }
-        float rt = padAxis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT), lt = padAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT);
-        if (rt > 0.05f) gIn.throttle = std::max(gIn.throttle, std::min(1.f, rt * 1.05f));
-        if (lt > 0.05f) gIn.brake = std::max(gIn.brake, std::min(1.f, lt * 1.05f));
+        float st = padStickToSteer(sx);
+        if (st != 0) gIn.steer = st;
+        float rt = padTrigger(padAxis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT)), lt = padTrigger(padAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT));
+        if (rt > 0) gIn.throttle = std::max(gIn.throttle, rt);
+        if (lt > 0) gIn.brake = std::max(gIn.brake, lt);
         // вибрация: удар (резкая потеря скорости) и тряска по бездорожью
         float dv = gPadPrevSpeed - fabsf(PL.speed);
-        if (dv > 2.5f && gPadRumbleT <= 0) { padRumble(clampf(dv / 10, 0.3f, 1), clampf(dv / 14, 0.2f, 1), 250 + (int)(dv * 25)); gPadRumbleT = 0.25f; }
+        if (!SV.padRumble) {}
+        else if (dv > 2.5f && gPadRumbleT <= 0) { padRumble(clampf(dv / 10, 0.3f, 1), clampf(dv / 14, 0.2f, 1), 250 + (int)(dv * 25)); gPadRumbleT = 0.25f; }
         else if (PL.offroad && fabsf(PL.speed) > 4 && gPadRumbleT <= 0) { padRumble(0.12f, 0.05f, 120); gPadRumbleT = 0.1f; }
     }
     gPadPrevSpeed = fabsf(PL.speed);
@@ -95491,7 +95578,8 @@ static void padUpdate(float dt) {
     static float ledT = 0; ledT -= dt;
     if (ledT <= 0) {
         ledT = 0.06f;
-        if (PL.flash && drive) { bool ph = fmodf(gTime, 0.5f) < 0.25f; SDL_GameControllerSetLED(gPad, ph ? 255 : 0, 0, ph ? 0 : 255); }
+        if (!SV.padLed) SDL_GameControllerSetLED(gPad, 0, 0, 0);
+        else if (PL.flash && drive) { bool ph = fmodf(gTime, 0.5f) < 0.25f; SDL_GameControllerSetLED(gPad, ph ? 255 : 0, 0, ph ? 0 : 255); }
         else SDL_GameControllerSetLED(gPad, 0, 30, 120);
     }
 #endif
