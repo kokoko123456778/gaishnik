@@ -95119,6 +95119,12 @@ static void drawMenuScene(float dt) {
 // ---------------------------------------------------------------------
 static float gIntroT = 0, gFadeIn = 0;
 static bool gIntroSkip = false;
+static bool gIntroQuack = false, gIntroThunk = false;
+// сброс заставки при каждом показе: остатки событий прошлого запуска не должны её пропускать
+static void startIntro() {
+    gScreen = SC_INTRO; gIntroT = 0; gIntroSkip = false; gBackPressed = false;
+    gIntroQuack = gIntroThunk = false; TAPS.clear(); SY.siren = 0;
+}
 static void introLightbar(float cx, float cy, float bw, float bh, bool redOn, bool blueOn, float u) {
     float bx = cx - bw / 2, by = cy - bh / 2, r = bh * 0.28f;
     UI.roundRect(bx + u * 3, by + u * 4, bw, bh, r, RGBA(0, 0, 0, 120));               // тень
@@ -95149,13 +95155,13 @@ static void drawIntro(float dt) {
     float u = U();
     gIntroT += dt; float t = gIntroT;
     const float SLIDE0 = 2.3f, SLIDE1 = 3.05f, TITLE0 = 2.85f, END = 5.4f;
-    if (gIntroSkip || !TAPS.empty() || gBackPressed) {   // пропуск — сразу в меню
+    if (t < 0.6f) { gIntroSkip = false; gBackPressed = false; TAPS.clear(); }   // первые 0.6 с ввод игнорируем
+    else if (gIntroSkip || !TAPS.empty() || gBackPressed) {   // пропуск — сразу в меню
         gIntroSkip = false; gBackPressed = false; TAPS.clear();
         SY.siren = 0; gScreen = SC_MENU; gFadeIn = 0.5f; return;
     }
     // звук: «кряк», затем вой сирены, пока мигалка на экране
-    static bool quacked = false, thunk = false;
-    if (t > 0.12f && !quacked) { quacked = true; sfx(SFX_QUACK, 0.9f); }
+    if (t > 0.12f && !gIntroQuack) { gIntroQuack = true; sfx(SFX_QUACK, 0.9f); }
     SY.engVol = 0; SY.engLoad = 0; SY.wind = 0; SY.screech = 0; SY.rain = 0; SY.ambient = 0;
     SY.siren = (t > 0.45f && t < SLIDE1 + 0.1f) ? 1.f : 0.f;
     // фон: ночь
@@ -95180,7 +95186,7 @@ static void drawIntro(float dt) {
     if (cy > -bh * 1.2f) introLightbar(SW / 2, cy, bw, bh, redOn, blueOn, u);
     // название
     if (t > TITLE0) {
-        if (!thunk) { thunk = true; sfx(SFX_THUNK, 0.7f); }
+        if (!gIntroThunk) { gIntroThunk = true; sfx(SFX_THUNK, 0.7f); }
         float a = clampf((t - TITLE0) / 0.55f, 0, 1), ea = 1 - (1 - a) * (1 - a);
         float sc = 1.22f - 0.22f * ea;
         int al = (int)(255 * ea);
@@ -95798,9 +95804,9 @@ int main(int argc, char** argv) {
 #endif
     loadGame();
 #ifdef GAISHNIK_TEST
-    if (getenv("INTRO")) { gScreen = SC_INTRO; gIntroT = 0; }
+    if (getenv("INTRO")) startIntro();
 #else
-    gScreen = SC_INTRO; gIntroT = 0;   // заставка при каждом запуске
+    startIntro();   // заставка при каждом запуске
 #endif
     // акселерометр (на Android доступен как джойстик) — для руления наклоном
     // геймпады: DualSense/DualShock с вибрацией и подсветкой
