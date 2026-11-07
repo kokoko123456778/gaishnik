@@ -91920,7 +91920,7 @@ static void drawSpeedCams(float time) {
 // =====================================================================
 //  Игровая логика и интерфейс
 // =====================================================================
-enum Screen { SC_MENU, SC_SHIFTSTART, SC_DRIVE, SC_DOCS, SC_TRUNK, SC_DECIDE, SC_RESULT, SC_PAUSE, SC_MAP, SC_GARAGE, SC_SUMMARY, SC_HELP, SC_EXITCONFIRM, SC_SETTINGS, SC_ACCIDENT };
+enum Screen { SC_MENU, SC_SHIFTSTART, SC_DRIVE, SC_DOCS, SC_TRUNK, SC_DECIDE, SC_RESULT, SC_PAUSE, SC_MAP, SC_GARAGE, SC_SUMMARY, SC_HELP, SC_EXITCONFIRM, SC_SETTINGS, SC_ACCIDENT, SC_INTRO };
 static int gSettingsReturn = 0;
 static SDL_Joystick* gAccel = nullptr;
 static float accelSteer();
@@ -95114,6 +95114,96 @@ static void drawMenuScene(float dt) {
     updateParts(dt);
     drawWorldScene(dt, true, false);
 }
+// ---------------------------------------------------------------------
+//  Заставка при запуске: мигалка в темноте со звуком -> уезжает вверх -> название игры
+// ---------------------------------------------------------------------
+static float gIntroT = 0, gFadeIn = 0;
+static bool gIntroSkip = false;
+static void introLightbar(float cx, float cy, float bw, float bh, bool redOn, bool blueOn, float u) {
+    float bx = cx - bw / 2, by = cy - bh / 2, r = bh * 0.28f;
+    UI.roundRect(bx + u * 3, by + u * 4, bw, bh, r, RGBA(0, 0, 0, 120));               // тень
+    UI.roundRect(bx - u * 2, by - u * 2, bw + u * 4, bh + u * 4, r + u, RGBA(70, 72, 80));   // хромированная окантовка
+    UI.roundRect(bx, by, bw, bh, r, RGBA(28, 30, 35));
+    float cw = bw * 0.17f, lw = (bw - cw) / 2 - u * 6, ly = by + u * 4, lh = bh - u * 8;
+    for (int side = 0; side < 2; side++) {
+        bool on = side == 0 ? redOn : blueOn;
+        float lx = side == 0 ? bx + u * 4 : cx + cw / 2 + u * 2;
+        SDL_Color off = side == 0 ? RGBA(85, 12, 14) : RGBA(12, 22, 90);
+        SDL_Color lit = side == 0 ? RGBA(255, 45, 35) : RGBA(40, 90, 255);
+        SDL_Color hot = side == 0 ? RGBA(255, 190, 170) : RGBA(190, 215, 255);
+        UI.roundRect(lx, ly, lw, lh, r * 0.6f, on ? lit : off);
+        // светодиоды: в каждой секции 3×2
+        for (int k = 0; k < 3; k++) for (int c2 = 0; c2 < 3; c2++) for (int r2 = 0; r2 < 2; r2++) {
+            float ex = lx + lw * k / 3 + lw / 3 * (c2 + 0.5f) / 3, ey = ly + lh * (r2 == 0 ? 0.34f : 0.68f), er = lh * 0.11f;
+            if (on) { UI.glow(ex, ey, er * 3.2f, RGBA(hot.r, hot.g, hot.b, 120)); UI.circle(ex, ey, er, hot, 12); }
+            else UI.circle(ex, ey, er, RGBA(off.r / 2 + 10, off.g / 2 + 8, off.b / 2 + 10), 12);
+        }
+        for (int k = 1; k < 3; k++) UI.rect(lx + lw * k / 3 - u * 0.7f, ly, u * 1.4f, lh, RGBA(20, 20, 24, 200));   // перегородки
+        UI.rectG(lx + u * 2, ly + u * 1.5f, lw - u * 4, lh * 0.28f, RGBA(255, 255, 255, on ? 90 : 35), RGBA(255, 255, 255, 0));   // блик на стекле
+    }
+    // центральный модуль с надписью
+    UI.roundRect(cx - cw / 2, ly, cw, lh, u * 3, RGBA(225, 228, 232));
+    UI.text(cx, ly + lh / 2 - bh * 0.13f, "ДПС", bh * 0.035f, RGBA(25, 60, 170), 1);
+}
+static void drawIntro(float dt) {
+    float u = U();
+    gIntroT += dt; float t = gIntroT;
+    const float SLIDE0 = 2.3f, SLIDE1 = 3.05f, TITLE0 = 2.85f, END = 5.4f;
+    if (gIntroSkip || !TAPS.empty() || gBackPressed) {   // пропуск — сразу в меню
+        gIntroSkip = false; gBackPressed = false; TAPS.clear();
+        SY.siren = 0; gScreen = SC_MENU; gFadeIn = 0.5f; return;
+    }
+    // звук: «кряк», затем вой сирены, пока мигалка на экране
+    static bool quacked = false, thunk = false;
+    if (t > 0.12f && !quacked) { quacked = true; sfx(SFX_QUACK, 0.9f); }
+    SY.engVol = 0; SY.engLoad = 0; SY.wind = 0; SY.screech = 0; SY.rain = 0; SY.ambient = 0;
+    SY.siren = (t > 0.45f && t < SLIDE1 + 0.1f) ? 1.f : 0.f;
+    // фон: ночь
+    UI.rectG(0, 0, SW, SH, RGBA(6, 8, 16), RGBA(14, 16, 26));
+    // мигание «полицейское»: три быстрые вспышки красным, потом три синим
+    float ph = fmodf(t, 0.9f);
+    bool redOn = ph < 0.45f && fmodf(ph, 0.15f) < 0.09f, blueOn = ph >= 0.45f && fmodf(ph - 0.45f, 0.15f) < 0.09f;
+    if (t < 0.25f) redOn = blueOn = false;
+    // положение мигалки: стоит по центру, затем разгоняется вверх за экран
+    float bw = std::min(SW * 0.72f, SH * 1.8f), bh = bw * 0.18f;
+    float k = clampf((t - SLIDE0) / (SLIDE1 - SLIDE0), 0, 1), e = k * k * (1.6f - 0.6f * k);
+    float cy = SH * 0.46f - e * (SH * 0.46f + bh * 1.5f);
+    float wash = 1 - clampf((t - SLIDE0 - 0.3f) / 1.0f, 0, 1);   // заливка светом слабеет, когда мигалка уходит
+    if (redOn) {
+        UI.rectGH(0, 0, SW, SH, RGBA(210, 20, 25, (int)(95 * wash)), RGBA(210, 20, 25, 0));
+        UI.glow(SW / 2 - bw * 0.27f, cy, bw * 0.55f, RGBA(255, 40, 30, (int)(170 * std::max(wash, 0.35f))));
+    }
+    if (blueOn) {
+        UI.rectGH(0, 0, SW, SH, RGBA(25, 60, 255, 0), RGBA(25, 60, 255, (int)(95 * wash)));
+        UI.glow(SW / 2 + bw * 0.27f, cy, bw * 0.55f, RGBA(40, 90, 255, (int)(170 * std::max(wash, 0.35f))));
+    }
+    if (cy > -bh * 1.2f) introLightbar(SW / 2, cy, bw, bh, redOn, blueOn, u);
+    // название
+    if (t > TITLE0) {
+        if (!thunk) { thunk = true; sfx(SFX_THUNK, 0.7f); }
+        float a = clampf((t - TITLE0) / 0.55f, 0, 1), ea = 1 - (1 - a) * (1 - a);
+        float sc = 1.22f - 0.22f * ea;
+        int al = (int)(255 * ea);
+        float ty = SH * 0.33f;
+        // отсветы мигалки по краям, затухают
+        float rem = clampf(1 - (t - TITLE0) / 1.6f, 0, 1);
+        if (redOn) UI.glow(SW * 0.12f, ty + u * 30, SW * 0.3f, RGBA(255, 40, 30, (int)(110 * rem)));
+        if (blueOn) UI.glow(SW * 0.88f, ty + u * 30, SW * 0.3f, RGBA(40, 90, 255, (int)(110 * rem)));
+        UI.text(SW / 2, ty, "ИНСПЕКТОР", u * 5.2f * sc, RGBA(255, 255, 255, al), 1, true);
+        UI.text(SW / 2, ty + u * 46 * sc, "ДПС", u * 5.2f * sc, RGBA(80, 140, 255, al), 1, true);
+        float lineK = clampf((t - TITLE0 - 0.35f) / 0.5f, 0, 1), lw = u * 190 * (1 - (1 - lineK) * (1 - lineK));
+        UI.rect(SW / 2 - lw / 2, ty + u * 92, lw, u * 3.5f, RGBA(220, 40, 40, al));
+        float st = clampf((t - TITLE0 - 0.8f) / 0.6f, 0, 1);
+        UI.text(SW / 2, ty + u * 102, "ПАТРУЛЬНАЯ СЛУЖБА", u * 1.3f, RGBA(200, 205, 215, (int)(255 * st)), 1, true);
+        // блик, пробегающий по надписи
+        float sw = (t - TITLE0 - 0.6f) / 0.9f;
+        if (sw > 0 && sw < 1) UI.glow(SW * (0.2f + 0.6f * sw), ty + u * 40, u * 60, RGBA(255, 255, 255, (int)(60 * sinf(sw * PI))));
+    }
+    // уход в меню
+    if (t > END - 0.5f) UI.rect(0, 0, SW, SH, RGBA(0, 0, 0, (int)(255 * clampf((t - (END - 0.5f)) / 0.5f, 0, 1))));
+    if (t > END) { SY.siren = 0; gScreen = SC_MENU; gFadeIn = 0.6f; }
+    if (t > 1.0f) UI.text(SW - u * 8, SH - u * 12, "НАЖМИ, ЧТОБЫ ПРОПУСТИТЬ", u * 0.8f, RGBA(120, 125, 140, 160), 2);
+}
 static void drawMenu(float dt) {
     float u = U();
     drawMenuScene(dt);
@@ -95450,6 +95540,7 @@ static void handleEvent(const SDL_Event& e) {
             break;
         case SDL_KEYDOWN:
             gKeys[e.key.keysym.scancode] = true;
+            if (gScreen == SC_INTRO && !e.key.repeat) gIntroSkip = true;
             if (e.key.keysym.sym == SDLK_AC_BACK || e.key.keysym.sym == SDLK_ESCAPE) gBackPressed = true;
             if (gScreen == SC_DRIVE && !e.key.repeat) {
                 if (e.key.keysym.sym == SDLK_f) { PL.flash = !PL.flash; PL.siren = PL.flash; }
@@ -95471,6 +95562,7 @@ static void handleEvent(const SDL_Event& e) {
         case SDL_CONTROLLERBUTTONDOWN: {
             if (!gPad || SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gPad)) != e.cbutton.which) break;
             int b = e.cbutton.button;
+            if (gScreen == SC_INTRO) { gIntroSkip = true; break; }
             bool drive = gScreen == SC_DRIVE;
             bool cursorTap = !drive ? (b == SDL_CONTROLLER_BUTTON_A) : (b == SDL_CONTROLLER_BUTTON_RIGHTSTICK);
             if (cursorTap) {
@@ -95602,6 +95694,7 @@ static void frame(float dt) {
     gCtxX = -1;
     if (gScreen != SC_DRIVE) padUpdate(dt);
     switch (gScreen) {
+        case SC_INTRO: drawIntro(dt); break;
         case SC_MENU: drawMenu(dt); break;
         case SC_EXITCONFIRM: drawExitConfirm(dt); break;
         case SC_SETTINGS: drawSettings(dt); break;
@@ -95650,7 +95743,8 @@ static void frame(float dt) {
             drawTrunkScreen(dt);
             break;
     }
-    padDrawCursor();
+    if (gFadeIn > 0) { UI.rect(0, 0, SW, SH, RGBA(0, 0, 0, (int)(255 * clampf(gFadeIn / 0.6f, 0, 1)))); gFadeIn -= dt; }   // плавное появление после заставки
+    if (gScreen != SC_INTRO) padDrawCursor();
     UI.flush();
     TAPS.clear();
     gBackPressed = false;
@@ -95703,6 +95797,11 @@ int main(int argc, char** argv) {
     if (bp) SDL_free(bp);
 #endif
     loadGame();
+#ifdef GAISHNIK_TEST
+    if (getenv("INTRO")) { gScreen = SC_INTRO; gIntroT = 0; }
+#else
+    gScreen = SC_INTRO; gIntroT = 0;   // заставка при каждом запуске
+#endif
     // акселерометр (на Android доступен как джойстик) — для руления наклоном
     // геймпады: DualSense/DualShock с вибрацией и подсветкой
 #ifdef SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE
