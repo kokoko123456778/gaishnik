@@ -87675,6 +87675,12 @@ static inline float trimBias(const CarModel& M, const MeshTri& t) {
     uint8_t ty = M.mats[t.mat].type;
     (void)ty; return (t.flags & TF_DECAL) ? -0.6f : (t.flags & TF_TRIM) ? -0.045f : ((t.flags & TF_BACK) ? 0.12f : 0.f);
 }
+// Ф40: её оболочка неплотная, и тёмные внутренние детали рисуются поверх кузова — отодвигаем их назад
+static inline float f40Bias(const CarModel& M, const MeshTri& t) {
+    if (&M != &CM[11]) return 0.f;
+    uint8_t ty = M.mats[t.mat].type;
+    return (ty == M_PAINT || ty == M_PAINT2) ? -0.5f : 0.4f;
+}
 static inline bool me_isPaint(const CarModel& M, const MeshTri& t) { uint8_t ty = M.mats[t.mat].type; return ty == M_PAINT || ty == M_PAINT2; }
 // отрисовать сетку с матрицей; возвращает false если вне поля зрения
 static bool gSmooth = true;
@@ -87737,7 +87743,7 @@ static void drawMesh(const CarModel& M, const Mesh& m, const Mat3& rot, const V3
             float fz = (gTmpV[t.a].z + gTmpV[t.b].z + gTmpV[t.c].z) * (1.f / 3);
             float ff = fogFactor(fz);
             SDL_Color s0 = toSDL(lerpc(cc[0], L.fog, ff)), s1 = toSDL(lerpc(cc[1], L.fog, ff)), s2 = toSDL(lerpc(cc[2], L.fog, ff));
-            R3.triView(gTmpV[t.a], gTmpV[t.b], gTmpV[t.c], s0, s1, s2, UV_WHITE, UV_WHITE, UV_WHITE, 2, CAR_CULL, bias + trimBias(M, t));
+            R3.triView(gTmpV[t.a], gTmpV[t.b], gTmpV[t.c], s0, s1, s2, UV_WHITE, UV_WHITE, UV_WHITE, 2, CAR_CULL, bias + trimBias(M, t) + f40Bias(M, t));
             continue;
         } else {
             c = shadeN(base, nw, cw, emis);
@@ -87755,7 +87761,7 @@ static void drawMesh(const CarModel& M, const Mesh& m, const Mat3& rot, const V3
         if (emis > 0.5f) ff *= 0.5f;
         c = lerpc(c, L.fog, ff);
         SDL_Color sc = toSDL(c);
-        R3.triView(gTmpV[t.a], gTmpV[t.b], gTmpV[t.c], sc, sc, sc, UV_WHITE, UV_WHITE, UV_WHITE, 2, CAR_CULL, bias + trimBias(M, t));
+        R3.triView(gTmpV[t.a], gTmpV[t.b], gTmpV[t.c], sc, sc, sc, UV_WHITE, UV_WHITE, UV_WHITE, 2, CAR_CULL, bias + trimBias(M, t) + f40Bias(M, t));
     }
 }
 
