@@ -95573,7 +95573,7 @@ static void handleEvent(const SDL_Event& e) {
             bool cursorTap = !drive ? (b == SDL_CONTROLLER_BUTTON_A) : (b == SDL_CONTROLLER_BUTTON_RIGHTSTICK);
             if (cursorTap) {
                 if (gCurX < 0) { gCurX = SW * 0.5f; gCurY = SH * 0.5f; }
-                padTapAt(gCurX, gCurY); gCurShowT = 4;
+                padTapAt(gCurX, gCurY); gCurShowT = std::max(gCurShowT, 4.f);
                 Finger f; f.id = (SDL_FingerID)-888; f.x = gCurX; f.y = gCurY; FINGERS.push_back(f); gCurHeld = true;
                 break;
             }
@@ -95648,10 +95648,11 @@ static void padUpdate(float dt) {
         if (gCurX < 0) { gCurX = SW * 0.5f; gCurY = SH * 0.5f; }
         float k = (m - 0.18f) / 0.82f, sp = SH * (0.25f + 1.6f * k * k) * SV.padCursor * dt / m;
         gCurX = clampf(gCurX + cx * sp, 0, (float)SW - 1); gCurY = clampf(gCurY + cy * sp, 0, (float)SH - 1);
-        gCurShowT = drive ? 3.f : 1e9f;
+        gCurShowT = 1e9f;   // курсор всегда виден, пока подключён геймпад (иначе за рулём не видно, куда нажимать)
         for (Finger& f : FINGERS) if (f.id == (SDL_FingerID)-888) { f.x = gCurX; f.y = gCurY; }
     }
-    if (!drive && gCurShowT < 5) { gCurShowT = 1e9f; if (gCurX < 0) { gCurX = SW * 0.5f; gCurY = SH * 0.5f; } }
+    if (gCurX < 0) { gCurX = SW * 0.5f; gCurY = SH * 0.5f; gCurShowT = 1e9f; }   // курсор появляется сразу, в любом экране
+    if (!drive && gCurShowT < 5) gCurShowT = 1e9f;
     gCurShowT -= dt;
     // руль и педали
     if (drive) {
